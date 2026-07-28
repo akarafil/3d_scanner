@@ -7,6 +7,17 @@
 struct Point3D {
     float x, y, z;
     float nx, ny, nz;
+    uint8_t r, g, b;
+};
+
+struct MeshVertex {
+    float x, y, z;
+    float nx, ny, nz;
+    uint8_t r, g, b;
+};
+
+struct MeshFace {
+    int v1, v2, v3;
 };
 
 class PoissonDeferredReconstruction {

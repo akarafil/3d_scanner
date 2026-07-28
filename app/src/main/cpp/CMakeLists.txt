@@ -38,6 +38,8 @@ add_library(magic3d_engine SHARED
     fusion/adaptive_depth_fusion.cpp
     thermal/thread_affinity.cpp
     mesh/poisson_deferred.cpp
+    mesh/mesh_exporter.cpp
+    third_party/xatlas/xatlas.cpp
     vulkan/vulkan_compute_engine.cpp
 )
 

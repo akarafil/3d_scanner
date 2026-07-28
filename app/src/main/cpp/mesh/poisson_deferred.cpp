@@ -2,21 +2,14 @@
 #include <android/log.h>
 #include <fstream>
 #include <vector>
-#include <cmath>
 #include <algorithm>
+#include "mesh_exporter.h"
 
 #define LOG_TAG "PoissonRecon"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-struct MeshVertex {
-    float x, y, z;
-    float nx, ny, nz;
-};
-
-struct MeshFace {
-    int v1, v2, v3;
-};
+// MeshVertex and MeshFace are defined in poisson_deferred.h
 
 bool PoissonDeferredReconstruction::GenerateMeshFromPointCloud(const std::vector<Point3D>& pointCloud, const std::string& outputFilePath) {
     if (pointCloud.empty()) {
@@ -169,6 +162,7 @@ bool PoissonDeferredReconstruction::GenerateMeshFromPointCloud(const std::vector
                     // Kenar kesişimlerini enterpole ederek pürüzsüz vertex koordinatı bulma
                     float sumX = 0.0f, sumY = 0.0f, sumZ = 0.0f;
                     float sumNx = 0.0f, sumNy = 0.0f, sumNz = 0.0f;
+                    float sumR = 0.0f, sumG = 0.0f, sumB = 0.0f;
                     int crossingCount = 0;
 
                     const int edges[12][2] = {
@@ -206,6 +200,11 @@ bool PoissonDeferredReconstruction::GenerateMeshFromPointCloud(const std::vector
                             sumNy += nearestPoints[c1].ny + t * (nearestPoints[c2].ny - nearestPoints[c1].ny);
                             sumNz += nearestPoints[c1].nz + t * (nearestPoints[c2].nz - nearestPoints[c1].nz);
 
+                            // Renk (RGB) enterpolasyonu
+                            sumR += nearestPoints[c1].r + t * (nearestPoints[c2].r - nearestPoints[c1].r);
+                            sumG += nearestPoints[c1].g + t * (nearestPoints[c2].g - nearestPoints[c1].g);
+                            sumB += nearestPoints[c1].b + t * (nearestPoints[c2].b - nearestPoints[c1].b);
+
                             crossingCount++;
                         }
                     }
@@ -224,12 +223,17 @@ bool PoissonDeferredReconstruction::GenerateMeshFromPointCloud(const std::vector
                         } else {
                             v.nx = 0.0f; v.ny = 0.0f; v.nz = 1.0f;
                         }
+
+                        v.r = static_cast<uint8_t>(std::clamp(sumR / crossingCount, 0.0f, 255.0f));
+                        v.g = static_cast<uint8_t>(std::clamp(sumG / crossingCount, 0.0f, 255.0f));
+                        v.b = static_cast<uint8_t>(std::clamp(sumB / crossingCount, 0.0f, 255.0f));
                     } else {
                         // Fallback: Hücre merkezi
                         v.x = minX + (i + 0.5f) * stepX;
                         v.y = minY + (j + 0.5f) * stepY;
                         v.z = minZ + (k + 0.5f) * stepZ;
                         v.nx = 0.0f; v.ny = 0.0f; v.nz = 1.0f;
+                        v.r = 200; v.g = 200; v.b = 200;
                     }
 
                     int cellIdx = (i * dim + j) * dim + k;
@@ -331,45 +335,11 @@ bool PoissonDeferredReconstruction::GenerateMeshFromPointCloud(const std::vector
         }
     }
 
-    // 6. Mesh PLY Dışa Aktarımı (Binary Little Endian)
-    std::ofstream outFile(outputFilePath, std::ios::binary);
-    if (!outFile.is_open()) {
-        LOGE("Failed to open output file: %s", outputFilePath.c_str());
-        return false;
+    // 6. Mesh OBJ/Texture Dışa Aktarımı
+    std::string baseFilePath = outputFilePath;
+    if (baseFilePath.size() > 4 && baseFilePath.substr(baseFilePath.size() - 4) == ".ply") {
+        baseFilePath = baseFilePath.substr(0, baseFilePath.size() - 4);
     }
-
-    outFile << "ply\n";
-    outFile << "format binary_little_endian 1.0\n";
-    outFile << "element vertex " << vertices.size() << "\n";
-    outFile << "property float x\n";
-    outFile << "property float y\n";
-    outFile << "property float z\n";
-    outFile << "property float nx\n";
-    outFile << "property float ny\n";
-    outFile << "property float nz\n";
-    outFile << "element face " << faces.size() << "\n";
-    outFile << "property list uchar int vertex_indices\n";
-    outFile << "end_header\n";
-
-    for (const auto& v : vertices) {
-        outFile.write(reinterpret_cast<const char*>(&v.x), sizeof(float));
-        outFile.write(reinterpret_cast<const char*>(&v.y), sizeof(float));
-        outFile.write(reinterpret_cast<const char*>(&v.z), sizeof(float));
-        outFile.write(reinterpret_cast<const char*>(&v.nx), sizeof(float));
-        outFile.write(reinterpret_cast<const char*>(&v.ny), sizeof(float));
-        outFile.write(reinterpret_cast<const char*>(&v.nz), sizeof(float));
-    }
-
-    for (const auto& f : faces) {
-        unsigned char list_len = 3;
-        outFile.write(reinterpret_cast<const char*>(&list_len), 1);
-        outFile.write(reinterpret_cast<const char*>(&f.v1), sizeof(int));
-        outFile.write(reinterpret_cast<const char*>(&f.v2), sizeof(int));
-        outFile.write(reinterpret_cast<const char*>(&f.v3), sizeof(int));
-    }
-
-    outFile.close();
-    LOGI("Deferred Poisson (Surface Nets) Mesh Reconstruction saved successfully: v=%zu, f=%zu to %s",
-         vertices.size(), faces.size(), outputFilePath.c_str());
-    return true;
+    
+    return MeshExporter::ExportTexturedObj(baseFilePath, vertices, faces);
 }

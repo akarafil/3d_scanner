@@ -65,7 +65,7 @@ class MainActivity : ComponentActivity() {
     private external fun clearAccumulatedPoints()
     private external fun getAccumulatedPointCount(): Int
     private external fun getAccumulatedPoints(): FloatArray
-    private external fun addPointsToAccumulator(x: FloatArray, y: FloatArray, z: FloatArray, nx: FloatArray, ny: FloatArray, nz: FloatArray, size: Int)
+    private external fun addPointsToAccumulator(x: FloatArray, y: FloatArray, z: FloatArray, nx: FloatArray, ny: FloatArray, nz: FloatArray, r: ByteArray, g: ByteArray, b: ByteArray, size: Int)
     private external fun initNativeEngine(): Boolean
     private external fun bindThreadAffinity(roleIndex: Int)
 
@@ -249,8 +249,10 @@ class MainActivity : ComponentActivity() {
 
             depthImage.close()
 
+            val cameraImage = try { frame.acquireCameraImage() } catch(e: Exception) { null }
             val dummyStereoDepth = FloatArray(width * height)
-            val dummyRgb = ByteArray(width * height * 3)
+            val dummyRgb = ByteArray(width * height * 3) // For NPU Engine
+
             val fusedOutput = FloatArray(width * height)
 
             fuseDepthMapsNative(arcoreDepth, arcoreConf, dummyStereoDepth, dummyRgb, fusedOutput, width, height)
@@ -275,6 +277,29 @@ class MainActivity : ComponentActivity() {
                 val nxList = ArrayList<Float>()
                 val nyList = ArrayList<Float>()
                 val nzList = ArrayList<Float>()
+                val rList = ArrayList<Byte>()
+                val gList = ArrayList<Byte>()
+                val bList = ArrayList<Byte>()
+
+                var yBuf: java.nio.ByteBuffer? = null
+                var uBuf: java.nio.ByteBuffer? = null
+                var vBuf: java.nio.ByteBuffer? = null
+                var yRowStride = 0
+                var uvRowStride = 0
+                var uvPixelStride = 0
+                var imgW = 0
+                var imgH = 0
+
+                if (cameraImage != null) {
+                    imgW = cameraImage.width
+                    imgH = cameraImage.height
+                    yBuf = cameraImage.planes[0].buffer
+                    uBuf = cameraImage.planes[1].buffer
+                    vBuf = cameraImage.planes[2].buffer
+                    yRowStride = cameraImage.planes[0].rowStride
+                    uvRowStride = cameraImage.planes[1].rowStride
+                    uvPixelStride = cameraImage.planes[1].pixelStride
+                }
 
                 for (py in 0 until height step step) {
                     for (px in 0 until width step step) {
@@ -325,19 +350,43 @@ class MainActivity : ComponentActivity() {
                             val nyWorld = cameraToWorldMatrix[1] * nxCam + cameraToWorldMatrix[5] * nyCam + cameraToWorldMatrix[9] * nzCam
                             val nzWorld = cameraToWorldMatrix[2] * nxCam + cameraToWorldMatrix[6] * nyCam + cameraToWorldMatrix[10] * nzCam
 
+                            var r = 200
+                            var g = 200
+                            var b = 200
+
+                            if (cameraImage != null) {
+                                // Map depth coords to camera coords
+                                val camX = (px.toFloat() / width.toFloat() * imgW).toInt().coerceIn(0, imgW - 1)
+                                val camY = (py.toFloat() / height.toFloat() * imgH).toInt().coerceIn(0, imgH - 1)
+
+                                val yIdx = camY * yRowStride + camX
+                                val uvIdx = (camY / 2) * uvRowStride + (camX / 2) * uvPixelStride
+
+                                val yVal = (yBuf!!.get(yIdx).toInt() and 0xFF).toFloat()
+                                val uVal = (uBuf!!.get(uvIdx).toInt() and 0xFF).toFloat() - 128f
+                                val vVal = (vBuf!!.get(uvIdx).toInt() and 0xFF).toFloat() - 128f
+
+                                r = (yVal + 1.370705f * vVal).toInt().coerceIn(0, 255)
+                                g = (yVal - 0.337633f * uVal - 0.698001f * vVal).toInt().coerceIn(0, 255)
+                                b = (yVal + 1.732446f * uVal).toInt().coerceIn(0, 255)
+                            }
+
                             xList.add(xWorld)
                             yList.add(yWorld)
                             zList.add(zWorld)
                             nxList.add(nxWorld)
                             nyList.add(nyWorld)
                             nzList.add(nzWorld)
+                            rList.add(r.toByte())
+                            gList.add(g.toByte())
+                            bList.add(b.toByte())
                         }
                     }
                 }
 
                 if (xList.isNotEmpty()) {
                     val size = xList.size
-                    addPointsToAccumulator(xList.toFloatArray(), yList.toFloatArray(), zList.toFloatArray(), nxList.toFloatArray(), nyList.toFloatArray(), nzList.toFloatArray(), size)
+                    addPointsToAccumulator(xList.toFloatArray(), yList.toFloatArray(), zList.toFloatArray(), nxList.toFloatArray(), nyList.toFloatArray(), nzList.toFloatArray(), rList.toByteArray(), gList.toByteArray(), bList.toByteArray(), size)
                     
                     val currentTime = System.currentTimeMillis()
                     if (currentTime - lastUiUpdateTime > 500) {
@@ -349,6 +398,8 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+
+            cameraImage?.close()
 
             val currentMs = System.currentTimeMillis()
             if (currentMs - lastPreviewUpdateTime > 100) {
