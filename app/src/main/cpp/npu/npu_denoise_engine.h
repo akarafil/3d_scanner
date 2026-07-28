@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <vector>
+#include <mutex>
 // Point3D struct'ı mesh modülünden alınır
 #include "../mesh/poisson_deferred.h"
 
@@ -118,15 +119,17 @@ public:
     );
 
     // Nokta bulutu üzerinde SOR uygular (kaydetmeden önce çağrılır)
-    void DenoisePointCloud(std::vector<Point3D>& points) const;
-
+    void DenoisePointCloud(std::vector<Point3D>& points);
     // Parametre ayarlama
-    void SetSORParams(int k, float stdMul) { m_sor.SetParams(k, stdMul); }
+    void SetSORParams(int k, float stdMul) { m_sorFilter.SetParams(k, stdMul); }
 
 private:
+    // NPU Engine'in thread-safe olması için mutex
+    std::mutex m_mutex;
+
     TemporalDepthStabilizer m_temporal;
     NpuBilateralFilter      m_bilateral;
-    NpuSORFilter            m_sor;
+    NpuSORFilter            m_sorFilter;
 
     std::vector<float>      m_tempBuffer; // Temporal → Bilateral arası buffer
 };

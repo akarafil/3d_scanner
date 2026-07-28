@@ -128,6 +128,16 @@ class MainActivity : ComponentActivity() {
     private fun setupARSession() {
         try {
             if (arSession == null) {
+                val availability = com.google.ar.core.ArCoreApk.getInstance().checkAvailability(this)
+                if (availability.isTransient) {
+                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ setupARSession() }, 200)
+                    return
+                }
+                if (!availability.isSupported) {
+                    Toast.makeText(this, "Bu cihaz ARCore desteklemiyor.", Toast.LENGTH_LONG).show()
+                    return
+                }
+                
                 arSession = Session(this)
                 val config = Config(arSession)
                 if (arSession!!.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
@@ -138,6 +148,7 @@ class MainActivity : ComponentActivity() {
                 arSession!!.configure(config)
             }
         } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "ARCore setup exception", e)
             Toast.makeText(this, "ARCore başlatılamadı: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
@@ -239,7 +250,7 @@ class MainActivity : ComponentActivity() {
             depthImage.close()
 
             val dummyStereoDepth = FloatArray(width * height)
-            val dummyRgb = ByteArray(width * height)
+            val dummyRgb = ByteArray(width * height * 3)
             val fusedOutput = FloatArray(width * height)
 
             fuseDepthMapsNative(arcoreDepth, arcoreConf, dummyStereoDepth, dummyRgb, fusedOutput, width, height)
@@ -344,7 +355,7 @@ class MainActivity : ComponentActivity() {
                         depthBitmap = previewBitmap
                     }
                 } catch (e: Exception) {
-                    // Geçici bitmap hatalarını yut
+                    android.util.Log.e("MainActivity", "Preview render error", e)
                 }
             }
 
@@ -352,10 +363,10 @@ class MainActivity : ComponentActivity() {
                 android.util.Log.i("MainActivity", "ARCore Depth Map Fused: w=$width, h=$height, first_pixel_val=${fusedOutput[0]}m")
             }
         } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "ARCore Frame exception", e)
             runOnUiThread {
                 depthBitmap = null
             }
-            // NotYetAvailableException veya diğer geçici durumları yut ve bir sonraki kareyi bekle
         }
     }
 
@@ -449,7 +460,7 @@ class MainActivity : ComponentActivity() {
                                     val dummyArDepth = FloatArray(size) { 1.5f }
                                     val dummyArConf = FloatArray(size) { 0.8f }
                                     val dummyStereoDepth = FloatArray(size) { 1.48f }
-                                    val dummyRgb = ByteArray(size) { 128.toByte() }
+                                    val dummyRgb = ByteArray(size * 3) { 128.toByte() }
                                     val output = FloatArray(size)
 
                                     fuseDepthMapsNative(dummyArDepth, dummyArConf, dummyStereoDepth, dummyRgb, output, w, h)

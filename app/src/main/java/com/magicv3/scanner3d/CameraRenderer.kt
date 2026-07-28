@@ -157,6 +157,13 @@ class CameraRenderer(
             GLES20.glAttachShader(it, vs)
             GLES20.glAttachShader(it, fs)
             GLES20.glLinkProgram(it)
+            val linkStatus = IntArray(1)
+            GLES20.glGetProgramiv(it, GLES20.GL_LINK_STATUS, linkStatus, 0)
+            if (linkStatus[0] == 0) {
+                val info = GLES20.glGetProgramInfoLog(it)
+                GLES20.glDeleteProgram(it)
+                throw RuntimeException("Program link failed: $info")
+            }
         }
     }
 
@@ -208,5 +215,12 @@ class CameraRenderer(
         GLES20.glCreateShader(type).also {
             GLES20.glShaderSource(it, code)
             GLES20.glCompileShader(it)
+            val compiled = IntArray(1)
+            GLES20.glGetShaderiv(it, GLES20.GL_COMPILE_STATUS, compiled, 0)
+            if (compiled[0] == 0) {
+                val info = GLES20.glGetShaderInfoLog(it)
+                GLES20.glDeleteShader(it)
+                throw RuntimeException("Shader compile error: $info")
+            }
         }
 }

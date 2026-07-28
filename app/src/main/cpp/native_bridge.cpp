@@ -7,6 +7,7 @@
 #include "npu/npu_denoise_engine.h"
 #include "fusion/adaptive_depth_fusion.h"
 #include "thermal/thread_affinity.h"
+#include <mutex>
 #include "mesh/poisson_deferred.h"
 
 #define LOG_TAG "NativeBridge"
@@ -31,16 +32,19 @@ Java_com_magicv3_scanner3d_MainActivity_bindThreadAffinity(JNIEnv* env, jobject 
     BindThreadToCores(role);
 }
 
+static std::mutex g_cloudMutex;
 static std::vector<Point3D> g_accumulatedPointCloud;
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_magicv3_scanner3d_MainActivity_clearAccumulatedPoints(JNIEnv* env, jobject /* this */) {
+    std::lock_guard<std::mutex> lock(g_cloudMutex);
     g_accumulatedPointCloud.clear();
     LOGI("Accumulated point cloud cleared.");
 }
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_magicv3_scanner3d_MainActivity_getAccumulatedPointCount(JNIEnv* env, jobject /* this */) {
+    std::lock_guard<std::mutex> lock(g_cloudMutex);
     return static_cast<jint>(g_accumulatedPointCloud.size());
 }
 
@@ -56,6 +60,7 @@ Java_com_magicv3_scanner3d_MainActivity_addPointsToAccumulator(
     jfloat* z = env->GetFloatArrayElements(zArr, nullptr);
 
     for (int i = 0; i < size; ++i) {
+        std::lock_guard<std::mutex> lock(g_cloudMutex);
         g_accumulatedPointCloud.push_back({x[i], y[i], z[i], nx, ny, nz});
     }
 
@@ -69,10 +74,13 @@ Java_com_magicv3_scanner3d_MainActivity_getAccumulatedPoints(JNIEnv* env, jobjec
     int size = g_accumulatedPointCloud.size();
     jfloatArray result = env->NewFloatArray(size * 3);
     jfloat* body = env->GetFloatArrayElements(result, nullptr);
-    for (int i = 0; i < size; ++i) {
-        body[i * 3 + 0] = g_accumulatedPointCloud[i].x;
-        body[i * 3 + 1] = g_accumulatedPointCloud[i].y;
-        body[i * 3 + 2] = g_accumulatedPointCloud[i].z;
+    {
+        std::lock_guard<std::mutex> lock(g_cloudMutex);
+        for (int i = 0; i < size; ++i) {
+            body[i * 3 + 0] = g_accumulatedPointCloud[i].x;
+            body[i * 3 + 1] = g_accumulatedPointCloud[i].y;
+            body[i * 3 + 2] = g_accumulatedPointCloud[i].z;
+        }
     }
     env->ReleaseFloatArrayElements(result, body, 0);
     return result;
@@ -84,8 +92,14 @@ Java_com_magicv3_scanner3d_MainActivity_exportPointCloudMesh(JNIEnv* env, jobjec
     std::string outPath(pathStr);
     env->ReleaseStringUTFChars(filePath, pathStr);
 
-    bool res = g_poissonRecon.GenerateMeshFromPointCloud(g_accumulatedPointCloud, outPath);
-    return static_cast<jboolean>(res);
+    std::vector<Point3D> localCloudCopy;
+    {
+        std::lock_guard<std::mutex> lock(g_cloudMutex);
+        localCloudCopy = g_accumulatedPointCloud;
+    }
+
+    bool success = g_poissonRecon.GenerateMeshFromPointCloud(localCloudCopy, outPath);
+    return static_cast<jboolean>(success);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -155,6 +169,7 @@ Java_com_magicv3_scanner3d_MainActivity_clearTemporalBuffer(JNIEnv* env, jobject
 // -----------------------------------------------
 extern "C" JNIEXPORT jint JNICALL
 Java_com_magicv3_scanner3d_MainActivity_denoisePointCloudNative(JNIEnv* env, jobject /* this */) {
+    std::lock_guard<std::mutex> lock(g_cloudMutex);
     int before = static_cast<int>(g_accumulatedPointCloud.size());
     g_denoiseEngine.DenoisePointCloud(g_accumulatedPointCloud);
     int after = static_cast<int>(g_accumulatedPointCloud.size());

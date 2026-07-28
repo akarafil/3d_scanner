@@ -254,19 +254,21 @@ bool PoissonDeferredReconstruction::GenerateMeshFromPointCloud(const std::vector
                     float s1 = sdfGrid[c1];
                     float s2 = sdfGrid[c2];
                     if (s1 < 1e8f && s2 < 1e8f && ((s1 < 0.0f && s2 >= 0.0f) || (s2 < 0.0f && s1 >= 0.0f))) {
-                        // Kenarı çevreleyen 4 hücre
-                        int v0 = cellVertices[(i * dim + (j - 1)) * dim + (k - 1)];
-                        int v1 = cellVertices[(i * dim + j) * dim + (k - 1)];
-                        int v2 = cellVertices[(i * dim + j) * dim + k];
-                        int v3 = cellVertices[(i * dim + (j - 1)) * dim + k];
+                        if (j > 0 && k > 0) {
+                            // Kenarı çevreleyen 4 hücre
+                            int v0 = cellVertices[(i * dim + (j - 1)) * dim + (k - 1)];
+                            int v1 = cellVertices[(i * dim + j) * dim + (k - 1)];
+                            int v2 = cellVertices[(i * dim + j) * dim + k];
+                            int v3 = cellVertices[(i * dim + (j - 1)) * dim + k];
 
-                        if (v0 >= 0 && v1 >= 0 && v2 >= 0 && v3 >= 0) {
-                            if (s1 > s2) {
-                                faces.push_back({v0, v2, v1});
-                                faces.push_back({v0, v3, v2});
-                            } else {
-                                faces.push_back({v0, v1, v2});
-                                faces.push_back({v0, v2, v3});
+                            if (v0 >= 0 && v1 >= 0 && v2 >= 0 && v3 >= 0) {
+                                if (s1 > s2) {
+                                    faces.push_back({v0, v2, v1});
+                                    faces.push_back({v0, v3, v2});
+                                } else {
+                                    faces.push_back({v0, v1, v2});
+                                    faces.push_back({v0, v2, v3});
+                                }
                             }
                         }
                     }
@@ -279,19 +281,21 @@ bool PoissonDeferredReconstruction::GenerateMeshFromPointCloud(const std::vector
                     float s1 = sdfGrid[c1];
                     float s2 = sdfGrid[c2];
                     if (s1 < 1e8f && s2 < 1e8f && ((s1 < 0.0f && s2 >= 0.0f) || (s2 < 0.0f && s1 >= 0.0f))) {
-                        // Kenarı çevreleyen 4 hücre
-                        int v0 = cellVertices[((i - 1) * dim + j) * dim + (k - 1)];
-                        int v1 = cellVertices[(i * dim + j) * dim + (k - 1)];
-                        int v2 = cellVertices[(i * dim + j) * dim + k];
-                        int v3 = cellVertices[((i - 1) * dim + j) * dim + k];
+                        if (i > 0 && k > 0) {
+                            // Kenarı çevreleyen 4 hücre
+                            int v0 = cellVertices[((i - 1) * dim + j) * dim + (k - 1)];
+                            int v1 = cellVertices[(i * dim + j) * dim + (k - 1)];
+                            int v2 = cellVertices[(i * dim + j) * dim + k];
+                            int v3 = cellVertices[((i - 1) * dim + j) * dim + k];
 
-                        if (v0 >= 0 && v1 >= 0 && v2 >= 0 && v3 >= 0) {
-                            if (s1 > s2) {
-                                faces.push_back({v0, v1, v2});
-                                faces.push_back({v0, v2, v3});
-                            } else {
-                                faces.push_back({v0, v2, v1});
-                                faces.push_back({v0, v3, v2});
+                            if (v0 >= 0 && v1 >= 0 && v2 >= 0 && v3 >= 0) {
+                                if (s1 > s2) {
+                                    faces.push_back({v0, v1, v2});
+                                    faces.push_back({v0, v2, v3});
+                                } else {
+                                    faces.push_back({v0, v2, v1});
+                                    faces.push_back({v0, v3, v2});
+                                }
                             }
                         }
                     }
@@ -304,19 +308,21 @@ bool PoissonDeferredReconstruction::GenerateMeshFromPointCloud(const std::vector
                     float s1 = sdfGrid[c1];
                     float s2 = sdfGrid[c2];
                     if (s1 < 1e8f && s2 < 1e8f && ((s1 < 0.0f && s2 >= 0.0f) || (s2 < 0.0f && s1 >= 0.0f))) {
-                        // Kenarı çevreleyen 4 hücre
-                        int v0 = cellVertices[((i - 1) * dim + (j - 1)) * dim + k];
-                        int v1 = cellVertices[(i * dim + (j - 1)) * dim + k];
-                        int v2 = cellVertices[(i * dim + j) * dim + k];
-                        int v3 = cellVertices[((i - 1) * dim + j) * dim + k];
+                        if (i > 0 && j > 0) {
+                            // Kenarı çevreleyen 4 hücre
+                            int v0 = cellVertices[((i - 1) * dim + (j - 1)) * dim + k];
+                            int v1 = cellVertices[(i * dim + (j - 1)) * dim + k];
+                            int v2 = cellVertices[(i * dim + j) * dim + k];
+                            int v3 = cellVertices[((i - 1) * dim + j) * dim + k];
 
-                        if (v0 >= 0 && v1 >= 0 && v2 >= 0 && v3 >= 0) {
-                            if (s1 > s2) {
-                                faces.push_back({v0, v2, v1});
-                                faces.push_back({v0, v3, v2});
-                            } else {
-                                faces.push_back({v0, v1, v2});
-                                faces.push_back({v0, v2, v3});
+                            if (v0 >= 0 && v1 >= 0 && v2 >= 0 && v3 >= 0) {
+                                if (s1 > s2) {
+                                    faces.push_back({v0, v2, v1});
+                                    faces.push_back({v0, v3, v2});
+                                } else {
+                                    faces.push_back({v0, v1, v2});
+                                    faces.push_back({v0, v2, v3});
+                                }
                             }
                         }
                     }

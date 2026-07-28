@@ -244,6 +244,7 @@ void NpuSORFilter::Filter(std::vector<Point3D>& points) const {
 // ============================================================
 
 void NpuDenoiseEngine::Reset() {
+    std::lock_guard<std::mutex> lock(m_mutex);
     m_temporal.Reset();
     m_tempBuffer.clear();
     LOGI("[NpuDenoise] Tam pipeline sıfırlandı.");
@@ -256,6 +257,7 @@ void NpuDenoiseEngine::ProcessDepthFrame(
     int            width,
     int            height)
 {
+    std::lock_guard<std::mutex> lock(m_mutex);
     const int N = width * height;
     if (m_tempBuffer.size() != static_cast<size_t>(N)) {
         m_tempBuffer.resize(N);
@@ -270,8 +272,9 @@ void NpuDenoiseEngine::ProcessDepthFrame(
     m_bilateral.Apply(m_tempBuffer.data(), rgbImg, outDepth, width, height);
 }
 
-void NpuDenoiseEngine::DenoisePointCloud(std::vector<Point3D>& points) const {
+void NpuDenoiseEngine::DenoisePointCloud(std::vector<Point3D>& points) {
+    std::lock_guard<std::mutex> lock(m_mutex);
     if (points.size() < 16) return; // Çok az nokta
     LOGI("[NpuDenoise] SOR başlatılıyor — %zu nokta.", points.size());
-    m_sor.Filter(points);
+    m_sorFilter.Filter(points);
 }
