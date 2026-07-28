@@ -53,20 +53,29 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_magicv3_scanner3d_MainActivity_addPointsToAccumulator(
     JNIEnv* env, jobject /* this */,
     jfloatArray xArr, jfloatArray yArr, jfloatArray zArr,
-    jfloat nx, jfloat ny, jfloat nz, jint size) {
+    jfloatArray nxArr, jfloatArray nyArr, jfloatArray nzArr, jint size) {
     
     jfloat* x = env->GetFloatArrayElements(xArr, nullptr);
     jfloat* y = env->GetFloatArrayElements(yArr, nullptr);
     jfloat* z = env->GetFloatArrayElements(zArr, nullptr);
+    jfloat* nx = env->GetFloatArrayElements(nxArr, nullptr);
+    jfloat* ny = env->GetFloatArrayElements(nyArr, nullptr);
+    jfloat* nz = env->GetFloatArrayElements(nzArr, nullptr);
 
-    for (int i = 0; i < size; ++i) {
+    {
         std::lock_guard<std::mutex> lock(g_cloudMutex);
-        g_accumulatedPointCloud.push_back({x[i], y[i], z[i], nx, ny, nz});
+        g_accumulatedPointCloud.reserve(g_accumulatedPointCloud.size() + size);
+        for (int i = 0; i < size; ++i) {
+            g_accumulatedPointCloud.push_back({x[i], y[i], z[i], nx[i], ny[i], nz[i]});
+        }
     }
 
     env->ReleaseFloatArrayElements(xArr, x, JNI_ABORT);
     env->ReleaseFloatArrayElements(yArr, y, JNI_ABORT);
     env->ReleaseFloatArrayElements(zArr, z, JNI_ABORT);
+    env->ReleaseFloatArrayElements(nxArr, nx, JNI_ABORT);
+    env->ReleaseFloatArrayElements(nyArr, ny, JNI_ABORT);
+    env->ReleaseFloatArrayElements(nzArr, nz, JNI_ABORT);
 }
 
 extern "C" JNIEXPORT jfloatArray JNICALL

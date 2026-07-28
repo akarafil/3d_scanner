@@ -17,7 +17,8 @@ void FuseDepthMaps(
             float sum = 0.0f, sumSq = 0.0f;
             for (int dy = -1; dy <= 1; ++dy) {
                 for (int dx = -1; dx <= 1; ++dx) {
-                    float val = static_cast<float>(rgbImage[(y + dy) * width + (x + dx)]);
+                    // RGB formatında gönderildiği için 3 kanallı okuma yapıyoruz
+                    float val = static_cast<float>(rgbImage[((y + dy) * width + (x + dx)) * 3]); // Grayscale luminance tahmini için R kanalı yeterli
                     sum += val;
                     sumSq += val * val;
                 }
@@ -25,17 +26,10 @@ void FuseDepthMaps(
             float mean = sum / 9.0f;
             float varTex = (sumSq / 9.0f) - (mean * mean);
 
-            // 2. Ağırlıkların Matrisel Formülasyonu
-            float cARCore = arcoreConfidence[idx]; // [0.0 - 1.0]
-            float wStereo = std::clamp(varTex / 15.0f, 0.0f, 1.0f) * (1.0f - cARCore);
-            float wARCore = cARCore;
-
-            float norm = wARCore + wStereo;
-            if (norm > 0.0001f) {
-                fusedOutput[idx] = (wARCore * arcoreDepth[idx] + wStereo * stereoDepth[idx]) / norm;
-            } else {
-                fusedOutput[idx] = arcoreDepth[idx];
-            }
+            // 2. Stereo ağırlığı cihazda NPU modeli olmadığı için iptal edildi.
+            // Sadece ARCore derinliğini kullanıyoruz. 
+            // Gelecekte gerçek stereo depth engine eklendiğinde açılabilir.
+            fusedOutput[idx] = arcoreDepth[idx];
         }
     }
 }

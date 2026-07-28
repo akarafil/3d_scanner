@@ -14,7 +14,8 @@ bool QNNDepthEngine::InitializeHTP() {
 }
 
 void QNNDepthEngine::ExecuteStereoInference(const uint8_t* leftImg, const uint8_t* rightImg, uint16_t* outDisparityINT16, int width, int height) {
-    // Backbone INT8 feature extraction & Cost Volume INT16 depth estimation stub
+    // Stereo iptal: Snapdragon 8 Gen 3 üzerinde stereo girdimiz yok.
+    // İleride gerçek ToF/Stereo modülü takılırsa açılacak.
     if (outDisparityINT16) {
         std::memset(outDisparityINT16, 0, width * height * sizeof(uint16_t));
     }
@@ -44,7 +45,8 @@ void QNNDepthEngine::ExecuteDepthRefinement(const float* inDepth, const uint8_t*
                 continue;
             }
 
-            uint8_t centerColor = rgbImg[idx];
+            // Grayscale (Luminance) tahmini için R kanalı
+            uint8_t centerColor = rgbImg[idx * 3];
             float sumVal = 0.0f;
             float sumW = 0.0f;
 
@@ -61,7 +63,7 @@ void QNNDepthEngine::ExecuteDepthRefinement(const float* inDepth, const uint8_t*
 
                     if (nDepth <= 0.05f) continue;
 
-                    uint8_t nColor = rgbImg[nIdx];
+                    uint8_t nColor = rgbImg[nIdx * 3];
 
                     // Spatial Gaussian kernel
                     float spatialDist = static_cast<float>(dx * dx + dy * dy);

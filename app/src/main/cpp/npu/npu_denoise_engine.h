@@ -74,7 +74,7 @@ private:
     int   m_k;
     float m_stdMul;
 
-    float knnMeanDistance(const std::vector<Point3D>& pts, int idx) const;
+    float knnMeanDistance(const std::vector<Point3D>& pts, int idx, std::vector<float>& distsBuffer) const;
 };
 
 // -------------------------------------------------------
@@ -86,7 +86,7 @@ class NpuBilateralFilter {
 public:
     static constexpr float SIGMA_S = 3.0f;  // Uzamsal Gaussian sigma
     static constexpr float SIGMA_R = 20.0f; // Renk mesafesi Gaussian sigma
-    static constexpr int   RADIUS  = 4;     // 9x9 pencere
+    static constexpr int   RADIUS  = 2;     // 5x5 pencere (termal throttleyi engellemek için)
 
     // rgbImg: W*H*3 byte dizisi (R,G,B sıralı)
     void Apply(

@@ -65,7 +65,7 @@ class MainActivity : ComponentActivity() {
     private external fun clearAccumulatedPoints()
     private external fun getAccumulatedPointCount(): Int
     private external fun getAccumulatedPoints(): FloatArray
-    private external fun addPointsToAccumulator(x: FloatArray, y: FloatArray, z: FloatArray, nx: Float, ny: Float, nz: Float, size: Int)
+    private external fun addPointsToAccumulator(x: FloatArray, y: FloatArray, z: FloatArray, nx: FloatArray, ny: FloatArray, nz: FloatArray, size: Int)
     private external fun initNativeEngine(): Boolean
     private external fun bindThreadAffinity(roleIndex: Int)
 
@@ -272,6 +272,9 @@ class MainActivity : ComponentActivity() {
                 val xList = ArrayList<Float>()
                 val yList = ArrayList<Float>()
                 val zList = ArrayList<Float>()
+                val nxList = ArrayList<Float>()
+                val nyList = ArrayList<Float>()
+                val nzList = ArrayList<Float>()
 
                 for (py in 0 until height step step) {
                     for (px in 0 until width step step) {
@@ -287,19 +290,54 @@ class MainActivity : ComponentActivity() {
                             val yWorld = cameraToWorldMatrix[1] * xCam + cameraToWorldMatrix[5] * yCam + cameraToWorldMatrix[9] * zCam + cameraToWorldMatrix[13]
                             val zWorld = cameraToWorldMatrix[2] * xCam + cameraToWorldMatrix[6] * yCam + cameraToWorldMatrix[10] * zCam + cameraToWorldMatrix[14]
 
+                            // Normal hesaplama (Gradient tabanlı)
+                            val rightDepth = if (px + step < width) fusedOutput[py * width + px + step] else depth
+                            val downDepth = if (py + step < height) fusedOutput[(py + step) * width + px] else depth
+
+                            val p1x = (px + step - cx) * rightDepth / fx
+                            val p1y = yCam
+                            val p1z = rightDepth
+
+                            val p2x = xCam
+                            val p2y = (py + step - cy) * downDepth / fy
+                            val p2z = downDepth
+
+                            val v1x = p1x - xCam
+                            val v1y = p1y - yCam
+                            val v1z = p1z - zCam
+
+                            val v2x = p2x - xCam
+                            val v2y = p2y - yCam
+                            val v2z = p2z - zCam
+
+                            var nxCam = v1y * v2z - v1z * v2y
+                            var nyCam = v1z * v2x - v1x * v2z
+                            var nzCam = v1x * v2y - v1y * v2x
+
+                            val len = kotlin.math.sqrt(nxCam * nxCam + nyCam * nyCam + nzCam * nzCam)
+                            if (len > 0.0001f) {
+                                nxCam /= len; nyCam /= len; nzCam /= len
+                            } else {
+                                nxCam = 0f; nyCam = 0f; nzCam = -1f
+                            }
+
+                            val nxWorld = cameraToWorldMatrix[0] * nxCam + cameraToWorldMatrix[4] * nyCam + cameraToWorldMatrix[8] * nzCam
+                            val nyWorld = cameraToWorldMatrix[1] * nxCam + cameraToWorldMatrix[5] * nyCam + cameraToWorldMatrix[9] * nzCam
+                            val nzWorld = cameraToWorldMatrix[2] * nxCam + cameraToWorldMatrix[6] * nyCam + cameraToWorldMatrix[10] * nzCam
+
                             xList.add(xWorld)
                             yList.add(yWorld)
                             zList.add(zWorld)
+                            nxList.add(nxWorld)
+                            nyList.add(nyWorld)
+                            nzList.add(nzWorld)
                         }
                     }
                 }
 
                 if (xList.isNotEmpty()) {
                     val size = xList.size
-                    val nx = -cameraToWorldMatrix[8]
-                    val ny = -cameraToWorldMatrix[9]
-                    val nz = -cameraToWorldMatrix[10]
-                    addPointsToAccumulator(xList.toFloatArray(), yList.toFloatArray(), zList.toFloatArray(), nx, ny, nz, size)
+                    addPointsToAccumulator(xList.toFloatArray(), yList.toFloatArray(), zList.toFloatArray(), nxList.toFloatArray(), nyList.toFloatArray(), nzList.toFloatArray(), size)
                     
                     val currentTime = System.currentTimeMillis()
                     if (currentTime - lastUiUpdateTime > 500) {

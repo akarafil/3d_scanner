@@ -164,32 +164,27 @@ void NpuBilateralFilter::Apply(
 // ============================================================
 
 float NpuSORFilter::knnMeanDistance(
-    const std::vector<Point3D>& pts, int idx) const
+    const std::vector<Point3D>& pts, int idx, std::vector<float>& distsBuffer) const
 {
-    // Küçük nokta bulutları için brute-force k-NN
-    // Büyük bulutlarda grid-index ile O(1) yapılabilir (ileride)
     const auto& p = pts[idx];
-
-    // Tüm mesafeleri hesapla, k-en küçüğünü bul
     int n = static_cast<int>(pts.size());
-    std::vector<float> dists;
-    dists.reserve(n - 1);
-
+    
+    distsBuffer.clear();
     for (int j = 0; j < n; ++j) {
         if (j == idx) continue;
         float dx = pts[j].x - p.x;
         float dy = pts[j].y - p.y;
         float dz = pts[j].z - p.z;
-        dists.push_back(dx*dx + dy*dy + dz*dz);
+        distsBuffer.push_back(dx*dx + dy*dy + dz*dz);
     }
 
-    int actualK = std::min(m_k, static_cast<int>(dists.size()));
+    int actualK = std::min(m_k, static_cast<int>(distsBuffer.size()));
     if (actualK <= 0) return 0.0f;
 
-    std::nth_element(dists.begin(), dists.begin() + actualK, dists.end());
+    std::nth_element(distsBuffer.begin(), distsBuffer.begin() + actualK, distsBuffer.end());
 
     float sum = 0.0f;
-    for (int i = 0; i < actualK; ++i) sum += std::sqrt(dists[i]);
+    for (int i = 0; i < actualK; ++i) sum += std::sqrt(distsBuffer[i]);
     return sum / actualK;
 }
 
@@ -202,10 +197,15 @@ void NpuSORFilter::Filter(std::vector<Point3D>& points) const {
     // Her noktanın k-NN ortalama mesafesini hesapla
     std::vector<float> meanDists(n, 0.0f);
 
-    // Brute-force: n küçük (<10k) için yeterli, büyük bulutlarda paralel
-    #pragma omp parallel for schedule(dynamic, 64)
-    for (int i = 0; i < n; ++i) {
-        meanDists[i] = knnMeanDistance(points, i);
+    #pragma omp parallel
+    {
+        std::vector<float> localDists;
+        localDists.reserve(n - 1);
+        
+        #pragma omp for schedule(dynamic, 64)
+        for (int i = 0; i < n; ++i) {
+            meanDists[i] = knnMeanDistance(points, i, localDists);
+        }
     }
 
     // Küresel istatistik

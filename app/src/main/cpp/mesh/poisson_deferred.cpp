@@ -43,15 +43,15 @@ bool PoissonDeferredReconstruction::GenerateMeshFromPointCloud(const std::vector
     minX -= padding; minY -= padding; minZ -= padding;
     maxX += padding; maxY += padding; maxZ += padding;
 
-    // Grid boyutları (dim = 40, toplam 40x40x40 hücre, mobil cihazlar için mükemmel denge)
-    const int dim = 40;
+    // Grid boyutları (dim = 128, yüksek çözünürlüklü)
+    const int dim = 128;
     float stepX = (maxX - minX) / dim;
     float stepY = (maxY - minY) / dim;
     float stepZ = (maxZ - minZ) / dim;
 
     // 2. Spatial Grid (Hızlı Arama İndeksi) oluşturma
-    // Bu indeks yakın noktaları O(1) sürede bulmak için 32x32x32 boyutlarındadır.
-    const int hashDim = 32;
+    // Bu indeks yakın noktaları O(1) sürede bulmak için 64x64x64 boyutlarındadır.
+    const int hashDim = 64;
     float hStepX = (maxX - minX) / hashDim;
     float hStepY = (maxY - minY) / hashDim;
     float hStepZ = (maxZ - minZ) / hashDim;
@@ -331,15 +331,15 @@ bool PoissonDeferredReconstruction::GenerateMeshFromPointCloud(const std::vector
         }
     }
 
-    // 6. Mesh PLY Dışa Aktarımı
-    std::ofstream outFile(outputFilePath);
+    // 6. Mesh PLY Dışa Aktarımı (Binary Little Endian)
+    std::ofstream outFile(outputFilePath, std::ios::binary);
     if (!outFile.is_open()) {
         LOGE("Failed to open output file: %s", outputFilePath.c_str());
         return false;
     }
 
     outFile << "ply\n";
-    outFile << "format ascii 1.0\n";
+    outFile << "format binary_little_endian 1.0\n";
     outFile << "element vertex " << vertices.size() << "\n";
     outFile << "property float x\n";
     outFile << "property float y\n";
@@ -352,12 +352,20 @@ bool PoissonDeferredReconstruction::GenerateMeshFromPointCloud(const std::vector
     outFile << "end_header\n";
 
     for (const auto& v : vertices) {
-        outFile << v.x << " " << v.y << " " << v.z << " "
-                << v.nx << " " << v.ny << " " << v.nz << "\n";
+        outFile.write(reinterpret_cast<const char*>(&v.x), sizeof(float));
+        outFile.write(reinterpret_cast<const char*>(&v.y), sizeof(float));
+        outFile.write(reinterpret_cast<const char*>(&v.z), sizeof(float));
+        outFile.write(reinterpret_cast<const char*>(&v.nx), sizeof(float));
+        outFile.write(reinterpret_cast<const char*>(&v.ny), sizeof(float));
+        outFile.write(reinterpret_cast<const char*>(&v.nz), sizeof(float));
     }
 
     for (const auto& f : faces) {
-        outFile << "3 " << f.v1 << " " << f.v2 << " " << f.v3 << "\n";
+        unsigned char list_len = 3;
+        outFile.write(reinterpret_cast<const char*>(&list_len), 1);
+        outFile.write(reinterpret_cast<const char*>(&f.v1), sizeof(int));
+        outFile.write(reinterpret_cast<const char*>(&f.v2), sizeof(int));
+        outFile.write(reinterpret_cast<const char*>(&f.v3), sizeof(int));
     }
 
     outFile.close();
