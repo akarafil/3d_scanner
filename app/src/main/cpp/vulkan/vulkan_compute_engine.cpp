@@ -263,7 +263,10 @@ bool VulkanComputeEngine::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usa
         return false;
     }
 
-    vkBindBufferMemory(m_device, buffer, bufferMemory, 0);
+    if (vkBindBufferMemory(m_device, buffer, bufferMemory, 0) != VK_SUCCESS) {
+        LOGE("Failed to bind buffer memory!");
+        return false;
+    }
     return true;
 }
 
@@ -419,6 +422,7 @@ bool VulkanComputeEngine::DispatchBilateralFilter(
 }
 
 void VulkanComputeEngine::CleanupBuffers() {
+    if (!m_device) return;
     if (m_inDepthBuffer.buffer) {
         vkDestroyBuffer(m_device, m_inDepthBuffer.buffer, nullptr);
         vkFreeMemory(m_device, m_inDepthBuffer.memory, nullptr);
@@ -437,20 +441,30 @@ void VulkanComputeEngine::CleanupBuffers() {
 }
 
 void VulkanComputeEngine::Cleanup() {
-    if (!m_initialized) return;
-
-    vkDeviceWaitIdle(m_device);
+    if (m_device) vkDeviceWaitIdle(m_device);
 
     CleanupBuffers();
 
-    vkDestroyPipeline(m_device, m_pipeline, nullptr);
-    vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
-    vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);
-    vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr);
+    if (m_pipeline) vkDestroyPipeline(m_device, m_pipeline, nullptr);
+    if (m_pipelineLayout) vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
+    if (m_descriptorPool) vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);
+    if (m_descriptorSetLayout) vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr);
 
-    vkDestroyCommandPool(m_device, m_commandPool, nullptr);
-    vkDestroyDevice(m_device, nullptr);
-    vkDestroyInstance(m_instance, nullptr);
+    if (m_commandBuffer && m_commandPool) {
+        vkFreeCommandBuffers(m_device, m_commandPool, 1, &m_commandBuffer);
+        m_commandBuffer = VK_NULL_HANDLE;
+    }
+    if (m_commandPool) vkDestroyCommandPool(m_device, m_commandPool, nullptr);
+    if (m_device) vkDestroyDevice(m_device, nullptr);
+    if (m_instance) vkDestroyInstance(m_instance, nullptr);
 
+    m_pipeline = VK_NULL_HANDLE;
+    m_pipelineLayout = VK_NULL_HANDLE;
+    m_descriptorPool = VK_NULL_HANDLE;
+    m_descriptorSetLayout = VK_NULL_HANDLE;
+    m_commandPool = VK_NULL_HANDLE;
+    m_device = VK_NULL_HANDLE;
+    m_instance = VK_NULL_HANDLE;
+    
     m_initialized = false;
 }

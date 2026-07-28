@@ -251,11 +251,47 @@ class MainActivity : ComponentActivity() {
 
             val cameraImage = try { frame.acquireCameraImage() } catch(e: Exception) { null }
             val dummyStereoDepth = FloatArray(width * height)
-            val dummyRgb = ByteArray(width * height * 3) // For NPU Engine
+            val realRgb = ByteArray(width * height * 3)
+
+            if (cameraImage != null) {
+                val imgW = cameraImage.width
+                val imgH = cameraImage.height
+                val yBuf = cameraImage.planes[0].buffer
+                val uBuf = cameraImage.planes[1].buffer
+                val vBuf = cameraImage.planes[2].buffer
+                val yRowStride = cameraImage.planes[0].rowStride
+                val uvRowStride = cameraImage.planes[1].rowStride
+                val uvPixelStride = cameraImage.planes[1].pixelStride
+
+                for (y in 0 until height) {
+                    for (x in 0 until width) {
+                        val camX = (x.toFloat() / width.toFloat() * imgW).toInt().coerceIn(0, imgW - 1)
+                        val camY = (y.toFloat() / height.toFloat() * imgH).toInt().coerceIn(0, imgH - 1)
+
+                        val yIdx = camY * yRowStride + camX
+                        val uvIdx = (camY / 2) * uvRowStride + (camX / 2) * uvPixelStride
+
+                        val yVal = (yBuf.get(yIdx).toInt() and 0xFF).toFloat()
+                        val uVal = (uBuf.get(uvIdx).toInt() and 0xFF).toFloat() - 128f
+                        val vVal = (vBuf.get(uvIdx).toInt() and 0xFF).toFloat() - 128f
+
+                        val r = (yVal + 1.370705f * vVal).toInt().coerceIn(0, 255)
+                        val g = (yVal - 0.337633f * uVal - 0.698001f * vVal).toInt().coerceIn(0, 255)
+                        val b = (yVal + 1.732446f * uVal).toInt().coerceIn(0, 255)
+
+                        val idx = (y * width + x) * 3
+                        realRgb[idx + 0] = r.toByte()
+                        realRgb[idx + 1] = g.toByte()
+                        realRgb[idx + 2] = b.toByte()
+                    }
+                }
+            } else {
+                for (i in realRgb.indices) realRgb[i] = 128.toByte()
+            }
 
             val fusedOutput = FloatArray(width * height)
 
-            fuseDepthMapsNative(arcoreDepth, arcoreConf, dummyStereoDepth, dummyRgb, fusedOutput, width, height)
+            fuseDepthMapsNative(arcoreDepth, arcoreConf, dummyStereoDepth, realRgb, fusedOutput, width, height)
 
             if (isScanning) {
                 val intrinsics = frame.camera.imageIntrinsics
@@ -529,7 +565,7 @@ class MainActivity : ComponentActivity() {
                                     Toast.makeText(this@MainActivity, "Tarama verileri temizlendi.", Toast.LENGTH_SHORT).show()
                                 },
                                 onExportMesh = {
-                                    val outputPath = "${externalCacheDir?.absolutePath}/scan_model.ply"
+                                    val outputPath = "${externalCacheDir?.absolutePath}/scan_model.obj"
                                     // NPU-SOR: Mesh kaydetmeden önce nokta bulutunu temizle
                                     val removedCount = denoisePointCloudNative()
                                     if (removedCount > 0) {
@@ -537,7 +573,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                     val success = exportPointCloudMesh(outputPath)
                                     if (success) {
-                                        Toast.makeText(this@MainActivity, "Model kaydedildi: $outputPath", Toast.LENGTH_LONG).show()
+                                        Toast.makeText(this@MainActivity, "Model kaydedildi: $outputPath, .mtl ve .png", Toast.LENGTH_LONG).show()
                                     } else {
                                         Toast.makeText(this@MainActivity, "Mesh kaydetme başarısız!", Toast.LENGTH_SHORT).show()
                                     }

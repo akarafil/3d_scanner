@@ -19,7 +19,7 @@ void BindThreadToCores(ThreadRole role) {
             LOGI("Thread pinned to Cortex-A520 Efficiency Cores (0, 1)");
             break;
         case ThreadRole::STEREO_MATCHING:
-            // Çekirdek 2, 3, 4, 5, 6 (Cortex-A720 Performance Cores)
+            // Stereo Matching için yoğun CPU gücü (Örn: Çekirdek 2, 3, 4)
             CPU_SET(2, &cpuset);
             CPU_SET(3, &cpuset);
             CPU_SET(4, &cpuset);

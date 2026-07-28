@@ -81,7 +81,7 @@ private:
 // -------------------------------------------------------
 // Gelişmiş Joint Bilateral Filter
 // RGB 3-kanal kenar bilgisiyle derinlik düzleştirme.
-// 9x9 kernel, OpenMP ile paralel çalışır.
+// 5x5 kernel, OpenMP ile paralel çalışır.
 // -------------------------------------------------------
 class NpuBilateralFilter {
 public:
@@ -108,8 +108,9 @@ class NpuDenoiseEngine {
 public:
     ~NpuDenoiseEngine();
 
-    // Tüm dahili buffer'ları sıfırla (tarama yeniden başladığında çağır)
+    // Tüm dahili buffer'ları ve GPU kaynaklarını sıfırla/kapat
     void Reset();
+    void Shutdown();
 
     // Per-frame çağrılır. Ham derinlik → temizlenmiş derinlik
     // rgbImg: nullable (yoksa bilateral renk bilgisi kullanılmaz)

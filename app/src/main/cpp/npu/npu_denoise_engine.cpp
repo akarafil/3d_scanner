@@ -245,6 +245,11 @@ void NpuSORFilter::Filter(std::vector<Point3D>& points) const {
 // ============================================================
 
 NpuDenoiseEngine::~NpuDenoiseEngine() {
+    Shutdown();
+}
+
+void NpuDenoiseEngine::Shutdown() {
+    std::lock_guard<std::mutex> lock(m_mutex);
     if (m_vkEngine) {
         delete m_vkEngine;
         m_vkEngine = nullptr;
