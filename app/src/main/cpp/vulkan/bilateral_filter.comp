@@ -1,0 +1,97 @@
+#version 450
+
+layout (local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer InDepthBuffer {
+    float inDepth[];
+};
+
+layout(std430, binding = 1) readonly buffer RgbBuffer {
+    uint rgb_data[];
+};
+
+layout(std430, binding = 2) writeonly buffer OutDepthBuffer {
+    float outDepth[];
+};
+
+layout(push_constant) uniform PushConstants {
+    int width;
+    int height;
+    float invSS2;
+    float invSR2;
+    int radius;
+    int useRgb;
+} pcs;
+
+// uint buffer'dan byte okuma (Little Endian mimari varsayımıyla)
+uint readByte(int byteIndex) {
+    int wordIndex = byteIndex / 4;
+    int byteOffset = (byteIndex % 4) * 8;
+    return (rgb_data[wordIndex] >> byteOffset) & 0xFFu;
+}
+
+vec3 readRGB(int pixelIdx) {
+    int byteIndex = pixelIdx * 3;
+    uint r = readByte(byteIndex);
+    uint g = readByte(byteIndex + 1);
+    uint b = readByte(byteIndex + 2);
+    return vec3(float(r), float(g), float(b));
+}
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    if (pos.x >= pcs.width || pos.y >= pcs.height) {
+        return;
+    }
+
+    int idx = pos.y * pcs.width + pos.x;
+    float dCtr = inDepth[idx];
+
+    if (dCtr <= 0.05) {
+        outDepth[idx] = 0.0;
+        return;
+    }
+
+    vec3 cCtr = vec3(128.0, 128.0, 128.0);
+    if (pcs.useRgb == 1) {
+        cCtr = readRGB(idx);
+    }
+
+    float sumVal = 0.0;
+    float sumW = 0.0;
+
+    for (int dy = -pcs.radius; dy <= pcs.radius; ++dy) {
+        int ny = pos.y + dy;
+        if (ny < 0 || ny >= pcs.height) continue;
+
+        for (int dx = -pcs.radius; dx <= pcs.radius; ++dx) {
+            int nx = pos.x + dx;
+            if (nx < 0 || nx >= pcs.width) continue;
+
+            int nIdx = ny * pcs.width + nx;
+            float nD = inDepth[nIdx];
+            if (nD <= 0.05) continue;
+
+            float spatDist = float(dx * dx + dy * dy);
+            float wS = exp(-spatDist * pcs.invSS2);
+
+            float wR = 1.0;
+            if (pcs.useRgb == 1) {
+                vec3 cN = readRGB(nIdx);
+                vec3 diff = cCtr - cN;
+                float colorDist2 = dot(diff, diff);
+                wR = exp(-colorDist2 * pcs.invSR2);
+            }
+
+            float w = wS * wR;
+            sumVal += nD * w;
+            sumW += w;
+        }
+    }
+
+    if (sumW > 0.0001) {
+        outDepth[idx] = sumVal / sumW;
+    } else {
+        outDepth[idx] = dCtr;
+    }
+}

@@ -7,6 +7,7 @@
 #include <mutex>
 // Point3D struct'ı mesh modülünden alınır
 #include "../mesh/poisson_deferred.h"
+#include "../vulkan/vulkan_compute_engine.h"
 
 // ============================================================
 //  NpuDenoiseEngine — Snapdragon 8 Gen 3 Hexagon HTP Simülasyonu
@@ -105,6 +106,8 @@ public:
 // -------------------------------------------------------
 class NpuDenoiseEngine {
 public:
+    ~NpuDenoiseEngine();
+
     // Tüm dahili buffer'ları sıfırla (tarama yeniden başladığında çağır)
     void Reset();
 
@@ -126,6 +129,8 @@ public:
 private:
     // NPU Engine'in thread-safe olması için mutex
     std::mutex m_mutex;
+
+    VulkanComputeEngine* m_vkEngine = nullptr;
 
     TemporalDepthStabilizer m_temporal;
     NpuBilateralFilter      m_bilateral;

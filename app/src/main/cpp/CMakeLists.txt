@@ -17,6 +17,7 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/fusion
     ${CMAKE_CURRENT_SOURCE_DIR}/thermal
     ${CMAKE_CURRENT_SOURCE_DIR}/mesh
+    ${CMAKE_CURRENT_SOURCE_DIR}/vulkan
 )
 
 # OpenCV Yapılandırması (Varsa include edilir)
@@ -37,6 +38,7 @@ add_library(magic3d_engine SHARED
     fusion/adaptive_depth_fusion.cpp
     thermal/thread_affinity.cpp
     mesh/poisson_deferred.cpp
+    vulkan/vulkan_compute_engine.cpp
 )
 
 target_link_libraries(magic3d_engine

@@ -23,9 +23,10 @@
 #  include <omp.h>
 #endif
 
-#define LOG_TAG "NpuDenoise"
+#define LOG_TAG "NpuDenoiseEngine"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 // ============================================================
 //  TemporalDepthStabilizer
@@ -243,10 +244,27 @@ void NpuSORFilter::Filter(std::vector<Point3D>& points) const {
 //  NpuDenoiseEngine — Tam Pipeline Orkestrasyonu
 // ============================================================
 
+NpuDenoiseEngine::~NpuDenoiseEngine() {
+    if (m_vkEngine) {
+        delete m_vkEngine;
+        m_vkEngine = nullptr;
+    }
+}
+
 void NpuDenoiseEngine::Reset() {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_temporal.Reset();
     m_tempBuffer.clear();
+    
+    if (!m_vkEngine) {
+        m_vkEngine = new VulkanComputeEngine();
+        if (!m_vkEngine->Initialize()) {
+            LOGE("[NpuDenoise] Vulkan Compute Engine initialization failed! Falling back to CPU OpenMP.");
+            delete m_vkEngine;
+            m_vkEngine = nullptr;
+        }
+    }
+    
     LOGI("[NpuDenoise] Tam pipeline sıfırlandı.");
 }
 
@@ -267,9 +285,21 @@ void NpuDenoiseEngine::ProcessDepthFrame(
     // Ham derinlikteki kare-karesi titreşmeleri EWM ile bastır
     m_temporal.Stabilize(rawDepth, m_tempBuffer.data(), width, height);
 
-    // Aşama 2 — Joint Bilateral Filter (9x9, 3-kanal RGB rehberli)
-    // Kenar geçişlerini koruyarak yüzey gürültüsünü temizle
-    m_bilateral.Apply(m_tempBuffer.data(), rgbImg, outDepth, width, height);
+    // Aşama 2 — Joint Bilateral Filter (Vulkan Compute Shader veya CPU Fallback)
+    bool gpuSuccess = false;
+    if (m_vkEngine && m_vkEngine->IsInitialized()) {
+        const float invSS2 = 1.0f / (2.0f * NpuBilateralFilter::SIGMA_S * NpuBilateralFilter::SIGMA_S);
+        const float invSR2 = 1.0f / (2.0f * NpuBilateralFilter::SIGMA_R * NpuBilateralFilter::SIGMA_R);
+        gpuSuccess = m_vkEngine->DispatchBilateralFilter(
+            m_tempBuffer.data(), rgbImg, outDepth, width, height,
+            invSS2, invSR2, NpuBilateralFilter::RADIUS
+        );
+    }
+
+    if (!gpuSuccess) {
+        // GPU başarısız olursa CPU OpenMP fallback
+        m_bilateral.Apply(m_tempBuffer.data(), rgbImg, outDepth, width, height);
+    }
 }
 
 void NpuDenoiseEngine::DenoisePointCloud(std::vector<Point3D>& points) {
