@@ -76,7 +76,9 @@ class MainActivity : ComponentActivity() {
         fx: Float, fy: Float, cx: Float, cy: Float,
         width: Int, height: Int,
         imgW: Int, imgH: Int,
-        isScanning: Boolean
+        isScanning: Boolean,
+        outDepthPixels: IntArray?,
+        outSegmentedPixels: IntArray?
     ): Float
     private external fun setTargetObjectROINative(normX: Float, normY: Float)
     private external fun clearTargetObjectROINative()
@@ -108,6 +110,9 @@ class MainActivity : ComponentActivity() {
     private var lastUiUpdateTime = 0L
     private var trackingStateString by mutableStateOf("Başlatılıyor...")
     private var depthBitmap by mutableStateOf<Bitmap?>(null)
+    private var segmentedBitmap by mutableStateOf<Bitmap?>(null)
+    private var depthPixels: IntArray? = null
+    private var segmentedPixels: IntArray? = null
     private var lastPreviewUpdateTime = 0L
     private var show3dPreviewDialog by mutableStateOf(false)
     private var accumulatedPointsArray by mutableStateOf(FloatArray(0))
@@ -263,6 +268,20 @@ class MainActivity : ComponentActivity() {
                 frame.camera.pose.toMatrix(cameraToWorldMatrix, 0)
             }
 
+            var dPix: IntArray? = null
+            var sPix: IntArray? = null
+
+            val currentTime = System.currentTimeMillis()
+            if (currentTime - lastPreviewUpdateTime > 100) {
+                lastPreviewUpdateTime = currentTime
+                if (depthPixels == null || depthPixels!!.size != width * height) {
+                    depthPixels = IntArray(width * height)
+                    segmentedPixels = IntArray(width * height)
+                }
+                dPix = depthPixels
+                sPix = segmentedPixels
+            }
+
             // Zero-Copy Native İşleme
             val avgDist = processFrameNative(
                 depthBuffer, depthRowStride, depthPixelStride,
@@ -273,14 +292,27 @@ class MainActivity : ComponentActivity() {
                 fx, fy, cx, cy,
                 width, height,
                 imgW, imgH,
-                isScanning
+                isScanning,
+                dPix, sPix
             )
 
             depthImage.close()
             confidenceImage?.close()
             cameraImage?.close()
 
-            val currentTime = System.currentTimeMillis()
+            if (dPix != null) {
+                val dBmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                dBmp.setPixels(dPix, 0, width, 0, 0, width, height)
+
+                val sBmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                sBmp.setPixels(sPix!!, 0, width, 0, 0, width, height)
+
+                runOnUiThread {
+                    depthBitmap = dBmp
+                    segmentedBitmap = sBmp
+                }
+            }
+
             if (currentTime - lastUiUpdateTime > 500) {
                 lastUiUpdateTime = currentTime
                 val currentTotal = getAccumulatedPointCount()
@@ -350,6 +382,7 @@ class MainActivity : ComponentActivity() {
                                 pointCount = pointCount,
                                 trackingState = trackingStateString,
                                 depthBitmap = depthBitmap,
+                                segmentedBitmap = segmentedBitmap,
                                 centerDistance = centerDistance,
                                 onStartScan = {
                                     isScanning = true
@@ -530,6 +563,7 @@ fun ScannerUI(
     pointCount: Int,
     trackingState: String,
     depthBitmap: Bitmap?,
+    segmentedBitmap: Bitmap?,
     centerDistance: Float,
     onStartScan: () -> Unit,
     onStopScan: () -> Unit,
@@ -593,8 +627,16 @@ fun ScannerUI(
                             .weight(1f)
                             .fillMaxHeight()
                             .border(1.dp, Color(0xFFFF3366).copy(alpha = 0.5f))
-                            .background(Color.Black.copy(alpha = 0.4f))
+                            .background(Color.Black.copy(alpha = 0.8f))
                     ) {
+                        depthBitmap?.let { bmp ->
+                            androidx.compose.foundation.Image(
+                                bitmap = bmp.asImageBitmap(),
+                                contentDescription = null,
+                                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
                         Text(
                             "🎯 ODAK & DERİNLİK MASKESİ",
                             color = Color(0xFFFF3366),
@@ -609,10 +651,18 @@ fun ScannerUI(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(110.dp)
+                        .height(140.dp)
                         .border(1.dp, Color(0xFF007AFF).copy(alpha = 0.5f))
-                        .background(Color.Black.copy(alpha = 0.5f))
+                        .background(Color.Black.copy(alpha = 0.85f))
                 ) {
+                    segmentedBitmap?.let { bmp ->
+                        androidx.compose.foundation.Image(
+                            bitmap = bmp.asImageBitmap(),
+                            contentDescription = null,
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                     Text(
                         "🔍 ULTRA-WIDE / SEÇİLİ OBJE İZOLASYONU",
                         color = Color(0xFF007AFF),

@@ -214,7 +214,9 @@ Java_com_magicv3_scanner3d_MainActivity_processFrameNative(
     jfloat fx, jfloat fy, jfloat cx, jfloat cy,
     jint width, jint height,
     jint imgW, jint imgH,
-    jboolean isScanning) {
+    jboolean isScanning,
+    jintArray outDepthPixels,
+    jintArray outSegmentedPixels) {
 
     if (!depthDirectBuf) return 0.0f;
 
@@ -283,6 +285,47 @@ Java_com_magicv3_scanner3d_MainActivity_processFrameNative(
     int centerX = width / 2;
     int centerY = height / 2;
     float centerDist = fusedOutput[centerY * width + centerX];
+
+    // 3a. Generate Depth Heatmap Pixels for Panel 2
+    if (outDepthPixels) {
+        jint* depthPix = env->GetIntArrayElements(outDepthPixels, nullptr);
+        for (int i = 0; i < N; ++i) {
+            float d = fusedOutput[i];
+            if (d <= 0.1f) {
+                depthPix[i] = 0xFF000000;
+            } else {
+                float norm = std::clamp((d - 0.1f) / 2.5f, 0.0f, 1.0f);
+                uint8_t r = static_cast<uint8_t>(255.0f * norm);
+                uint8_t g = static_cast<uint8_t>(255.0f * (1.0f - std::abs(norm - 0.5f) * 2.0f));
+                uint8_t b = static_cast<uint8_t>(255.0f * (1.0f - norm));
+                depthPix[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
+            }
+        }
+        env->ReleaseIntArrayElements(outDepthPixels, depthPix, 0);
+    }
+
+    // 3b. Generate Segmented/Isolated Object Pixels for Panel 3 (Background Removed)
+    if (outSegmentedPixels) {
+        jint* segPix = env->GetIntArrayElements(outSegmentedPixels, nullptr);
+        for (int i = 0; i < N; ++i) {
+            float d = fusedOutput[i];
+            bool isTarget = true;
+            if (g_useObjectROI && g_targetDepth > 0.1f) {
+                if (std::abs(d - g_targetDepth) > g_depthTolerance) {
+                    isTarget = false;
+                }
+            }
+            if (d > 0.1f && isTarget) {
+                uint8_t r = rgbImg[i * 3 + 0];
+                uint8_t g = rgbImg[i * 3 + 1];
+                uint8_t b = rgbImg[i * 3 + 2];
+                segPix[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
+            } else {
+                segPix[i] = 0xFF000000; // Arka plan silindi!
+            }
+        }
+        env->ReleaseIntArrayElements(outSegmentedPixels, segPix, 0);
+    }
 
     // If ROI is requested and targetDepth is not yet locked, lock it from touch point or center
     if (g_useObjectROI && g_targetDepth <= 0.0f) {
