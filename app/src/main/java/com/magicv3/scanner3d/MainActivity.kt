@@ -301,15 +301,20 @@ class MainActivity : ComponentActivity() {
             cameraImage?.close()
 
             if (dPix != null) {
-                val dBmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                dBmp.setPixels(dPix, 0, width, 0, 0, width, height)
+                val rawDBmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                rawDBmp.setPixels(dPix, 0, width, 0, 0, width, height)
 
-                val sBmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                sBmp.setPixels(sPix!!, 0, width, 0, 0, width, height)
+                val rawSBmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                rawSBmp.setPixels(sPix!!, 0, width, 0, 0, width, height)
+
+                // Dikey (Portrait) ekran konumuna uyarlamak için 90 derece döndür
+                val matrix = android.graphics.Matrix().apply { postRotate(90f) }
+                val rotatedDBmp = Bitmap.createBitmap(rawDBmp, 0, 0, width, height, matrix, true)
+                val rotatedSBmp = Bitmap.createBitmap(rawSBmp, 0, 0, width, height, matrix, true)
 
                 runOnUiThread {
-                    depthBitmap = dBmp
-                    segmentedBitmap = sBmp
+                    depthBitmap = rotatedDBmp
+                    segmentedBitmap = rotatedSBmp
                 }
             }
 
@@ -342,113 +347,95 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = Color.Transparent
+                    color = Color.Black
                 ) {
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        // OpenGL Camera Preview — ekran dolduran, aspect-correct
-                        if (hasCameraPermission && arSession != null) {
-                            // Modern API: Android R+ WindowMetrics, altı için eski yol
-                            val rotation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                                display?.rotation ?: Surface.ROTATION_0
-                            } else {
-                                @Suppress("DEPRECATION")
-                                windowManager.defaultDisplay.rotation
+                    val rotation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        display?.rotation ?: Surface.ROTATION_0
+                    } else {
+                        @Suppress("DEPRECATION")
+                        windowManager.defaultDisplay.rotation
+                    }
+
+                    val glSurfaceView = remember {
+                        GLSurfaceView(this).apply {
+                            preserveEGLContextOnPause = true
+                            setEGLContextClientVersion(2)
+                            val renderer = CameraRenderer(arSession!!) { frame ->
+                                onARCoreFrame(frame)
                             }
-                            AndroidView(
-                                factory = { context ->
-                                    GLSurfaceView(context).apply {
-                                        preserveEGLContextOnPause = true
-                                        setEGLContextClientVersion(2)
-                                        val renderer = CameraRenderer(arSession!!) { frame ->
-                                            onARCoreFrame(frame)
-                                        }
-                                        renderer.displayRotation = rotation
-                                        setRenderer(renderer)
-                                        renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
-                                    }
-                                },
-                                modifier = Modifier.fillMaxSize()
-                            )
+                            renderer.displayRotation = rotation
+                            setRenderer(renderer)
+                            renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
                         }
+                    }
 
-                        // Transparent Surface for UI layout
-                        Surface(
-                            modifier = Modifier.fillMaxSize(),
-                            color = Color.Transparent
-                        ) {
-                            ScannerUI(
-                                isEngineReady = isEngineReady,
-                                isScanning = isScanning,
-                                pointCount = pointCount,
-                                trackingState = trackingStateString,
-                                depthBitmap = depthBitmap,
-                                segmentedBitmap = segmentedBitmap,
-                                centerDistance = centerDistance,
-                                onStartScan = {
-                                    isScanning = true
-                                    clearTemporalBuffer() // Yeni tarama: NPU temporal buffer'sıfırla
-                                    Toast.makeText(this@MainActivity, "Tarama başlatıldı. Cihazı yavaşça hareket ettirin.", Toast.LENGTH_SHORT).show()
-                                },
-                                onStopScan = {
-                                    isScanning = false
-                                    Toast.makeText(this@MainActivity, "Tarama durduruldu.", Toast.LENGTH_SHORT).show()
-                                },
-                                onClearScan = {
-                                    isScanning = false
-                                    clearAccumulatedPoints()
-                                    clearTargetObjectROINative()
-                                    pointCount = 0
-                                    Toast.makeText(this@MainActivity, "Tarama verileri temizlendi.", Toast.LENGTH_SHORT).show()
-                                },
-                                onExportMesh = {
-                                    val outputPath = "${externalCacheDir?.absolutePath}/scan_model.obj"
-                                    // NPU-SOR: Mesh kaydetmeden önce nokta bulutunu temizle
-                                    val removedCount = denoisePointCloudNative()
-                                    if (removedCount > 0) {
-                                        Toast.makeText(this@MainActivity, "NPU-SOR: $removedCount parazit nokta temizlendi.", Toast.LENGTH_SHORT).show()
-                                    }
-                                    val success = exportPointCloudMesh(outputPath)
-                                    if (success) {
-                                        Toast.makeText(this@MainActivity, "Model kaydedildi: $outputPath, .mtl ve .png", Toast.LENGTH_LONG).show()
-                                    } else {
-                                        Toast.makeText(this@MainActivity, "Mesh kaydetme başarısız!", Toast.LENGTH_SHORT).show()
-                                    }
-                                },
-                                onTestFusion = {
-                                    val w = 64
-                                    val h = 64
-                                    val size = w * h
-                                    val dummyArDepth = FloatArray(size) { 1.5f }
-                                    val dummyArConf = FloatArray(size) { 0.8f }
-                                    val dummyStereoDepth = FloatArray(size) { 1.48f }
-                                    val dummyRgb = ByteArray(size * 3) { 128.toByte() }
-                                    val output = FloatArray(size)
-
-                                    fuseDepthMapsNative(dummyArDepth, dummyArConf, dummyStereoDepth, dummyRgb, output, w, h)
-                                    val centerVal = output[w * h / 2 + w / 2]
-                                    Toast.makeText(this@MainActivity, "Derinlik Füzyonu Tamamlandı (${centerVal}m)", Toast.LENGTH_SHORT).show()
-                                },
-                                onShowPreview3D = {
-                                    val pts = getAccumulatedPoints()
-                                    if (pts.isNotEmpty()) {
-                                        accumulatedPointsArray = pts
-                                        show3dPreviewDialog = true
-                                    } else {
-                                        Toast.makeText(this@MainActivity, "Önizlenecek nokta yok!", Toast.LENGTH_SHORT).show()
-                                    }
-                                },
-                                onSetTargetROI = { normU, normV ->
-                                    setTargetObjectROINative(normU, normV)
-                                }
-                            )
+                    ScannerUI(
+                        isEngineReady = isEngineReady,
+                        isScanning = isScanning,
+                        pointCount = pointCount,
+                        trackingState = trackingStateString,
+                        depthBitmap = depthBitmap,
+                        segmentedBitmap = segmentedBitmap,
+                        centerDistance = centerDistance,
+                        glSurfaceView = glSurfaceView,
+                        onStartScan = {
+                            isScanning = true
+                            clearTemporalBuffer()
+                            Toast.makeText(this@MainActivity, "Tarama başlatıldı.", Toast.LENGTH_SHORT).show()
+                        },
+                        onStopScan = {
+                            isScanning = false
+                            Toast.makeText(this@MainActivity, "Tarama durduruldu.", Toast.LENGTH_SHORT).show()
+                        },
+                        onClearScan = {
+                            isScanning = false
+                            clearAccumulatedPoints()
+                            clearTargetObjectROINative()
+                            pointCount = 0
+                            Toast.makeText(this@MainActivity, "Veriler temizlendi.", Toast.LENGTH_SHORT).show()
+                        },
+                        onExportMesh = {
+                            val outputPath = "${externalCacheDir?.absolutePath}/scan_model.obj"
+                            val removedCount = denoisePointCloudNative()
+                            if (removedCount > 0) {
+                                Toast.makeText(this@MainActivity, "NPU-SOR: $removedCount parazit nokta temizlendi.", Toast.LENGTH_SHORT).show()
+                            }
+                            val success = exportPointCloudMesh(outputPath)
+                            if (success) {
+                                Toast.makeText(this@MainActivity, "Model kaydedildi: $outputPath", Toast.LENGTH_LONG).show()
+                            } else {
+                                Toast.makeText(this@MainActivity, "Mesh kaydetme başarısız!", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        onTestFusion = {
+                            val w = 64; val h = 64; val size = w * h
+                            val dummyArDepth = FloatArray(size) { 1.5f }
+                            val dummyArConf = FloatArray(size) { 0.8f }
+                            val dummyStereoDepth = FloatArray(size) { 1.48f }
+                            val dummyRgb = ByteArray(size * 3) { 128.toByte() }
+                            val output = FloatArray(size)
+                            fuseDepthMapsNative(dummyArDepth, dummyArConf, dummyStereoDepth, dummyRgb, output, w, h)
+                            Toast.makeText(this@MainActivity, "Füzyon Tamamlandı", Toast.LENGTH_SHORT).show()
+                        },
+                        onShowPreview3D = {
+                            val pts = getAccumulatedPoints()
+                            if (pts.isNotEmpty()) {
+                                accumulatedPointsArray = pts
+                                show3dPreviewDialog = true
+                            } else {
+                                Toast.makeText(this@MainActivity, "Önizlenecek nokta yok!", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        onSetTargetROI = { normU, normV ->
+                            setTargetObjectROINative(normU, normV)
                         }
+                    )
 
-                        if (show3dPreviewDialog) {
-                            PointCloudPreviewDialog(
-                                points = accumulatedPointsArray,
-                                onDismiss = { show3dPreviewDialog = false }
-                            )
-                        }
+                    if (show3dPreviewDialog) {
+                        PointCloudPreviewDialog(
+                            points = accumulatedPointsArray,
+                            onDismiss = { show3dPreviewDialog = false }
+                        )
                     }
                 }
             }
@@ -565,6 +552,7 @@ fun ScannerUI(
     depthBitmap: Bitmap?,
     segmentedBitmap: Bitmap?,
     centerDistance: Float,
+    glSurfaceView: GLSurfaceView,
     onStartScan: () -> Unit,
     onStopScan: () -> Unit,
     onClearScan: () -> Unit,
@@ -574,7 +562,6 @@ fun ScannerUI(
     onSetTargetROI: (Float, Float) -> Unit
 ) {
     val isTracking = trackingState.startsWith("Aktif")
-    var showMultiCamMode by remember { mutableStateOf(true) }
     var roiTargetPoint by remember { mutableStateOf<Offset?>(null) }
 
     // Tarama animasyonu
@@ -590,6 +577,7 @@ fun ScannerUI(
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .background(Color.Black)
             .pointerInput(Unit) {
                 detectTapGestures { offset ->
                     roiTargetPoint = offset
@@ -600,76 +588,126 @@ fun ScannerUI(
             }
     ) {
 
-        // ── 3 KAMERA HİBRİT PANEL DÜZENİ ───────────────────
-        if (showMultiCamMode) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                    // Panel 1: Ana RGB Kamera
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight()
-                            .border(1.dp, Color(0xFF00FFCC).copy(alpha = 0.5f))
-                            .background(Color.Black.copy(alpha = 0.3f))
-                    ) {
-                        Text(
-                            "📷 ANA KAMERA (RGB)",
-                            color = Color(0xFF00FFCC),
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(6.dp)
+        // ── 3 KAMERA PRO HİBRİT PANEL DÜZENİ ───────────────────
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = 70.dp, bottom = 20.dp, start = 8.dp, end = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            // ÜST SIRA (2 EŞİT KART: RGB KAMERA vs DERİNLİK MASKESİ)
+            Row(
+                modifier = Modifier
+                    .weight(1.3f)
+                    .fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // PANEL 1: ANA RGB KAMERA (ARCore GLSurfaceView)
+                Card(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                    shape = RoundedCornerShape(18.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.Black),
+                    border = BorderStroke(1.5.dp, Color(0xFF00FFCC).copy(alpha = 0.8f))
+                ) {
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        AndroidView(
+                            factory = { glSurfaceView },
+                            modifier = Modifier.fillMaxSize()
                         )
+                        Surface(
+                            color = Color.Black.copy(alpha = 0.6f),
+                            shape = RoundedCornerShape(bottomEnd = 12.dp),
+                            modifier = Modifier.align(Alignment.TopStart)
+                        ) {
+                            Text(
+                                "📷 ANA KAMERA (RGB)",
+                                color = Color(0xFF00FFCC),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
                     }
+                }
 
-                    // Panel 2: Derinlik / İzolasyon Haritası
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight()
-                            .border(1.dp, Color(0xFFFF3366).copy(alpha = 0.5f))
-                            .background(Color.Black.copy(alpha = 0.8f))
-                    ) {
+                // PANEL 2: CANLI ODAK & DERİNLİK MASKESİ
+                Card(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                    shape = RoundedCornerShape(18.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF111116)),
+                    border = BorderStroke(1.5.dp, Color(0xFFFF3366).copy(alpha = 0.8f))
+                ) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         depthBitmap?.let { bmp ->
                             androidx.compose.foundation.Image(
                                 bitmap = bmp.asImageBitmap(),
                                 contentDescription = null,
-                                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                                contentScale = androidx.compose.ui.layout.ContentScale.Fit,
                                 modifier = Modifier.fillMaxSize()
                             )
-                        }
-                        Text(
-                            "🎯 ODAK & DERİNLİK MASKESİ",
-                            color = Color(0xFFFF3366),
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(6.dp)
+                        } ?: Text(
+                            "Derinlik Haritası Bekleniyor...",
+                            color = Color.White.copy(alpha = 0.4f),
+                            fontSize = 10.sp
                         )
+
+                        Surface(
+                            color = Color.Black.copy(alpha = 0.6f),
+                            shape = RoundedCornerShape(bottomEnd = 12.dp),
+                            modifier = Modifier.align(Alignment.TopStart)
+                        ) {
+                            Text(
+                                "🎯 ODAK & DERİNLİK MASKESİ",
+                                color = Color(0xFFFF3366),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
                     }
                 }
+            }
 
-                // Panel 3: Geniş Açı / Obje İzolasyonu
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(140.dp)
-                        .border(1.dp, Color(0xFF007AFF).copy(alpha = 0.5f))
-                        .background(Color.Black.copy(alpha = 0.85f))
-                ) {
+            // ALT SIRA: PANEL 3 (SEÇİLİ OBJE İZOLASYONU - ARKA PLAN SİLİNMİŞ)
+            Card(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF111116)),
+                border = BorderStroke(1.5.dp, Color(0xFF007AFF).copy(alpha = 0.8f))
+            ) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     segmentedBitmap?.let { bmp ->
                         androidx.compose.foundation.Image(
                             bitmap = bmp.asImageBitmap(),
                             contentDescription = null,
-                            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                            contentScale = androidx.compose.ui.layout.ContentScale.Fit,
                             modifier = Modifier.fillMaxSize()
                         )
-                    }
-                    Text(
-                        "🔍 ULTRA-WIDE / SEÇİLİ OBJE İZOLASYONU",
-                        color = Color(0xFF007AFF),
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(6.dp)
+                    } ?: Text(
+                        "Obje İzolasyon Akışı Bekleniyor...",
+                        color = Color.White.copy(alpha = 0.4f),
+                        fontSize = 11.sp
                     )
+
+                    Surface(
+                        color = Color.Black.copy(alpha = 0.6f),
+                        shape = RoundedCornerShape(bottomEnd = 12.dp),
+                        modifier = Modifier.align(Alignment.TopStart)
+                    ) {
+                        Text(
+                            "🔍 SEÇİLİ OBJE İZOLASYONU (ARKA PLAN SİLİNDİ)",
+                            color = Color(0xFF007AFF),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
                 }
             }
         }
