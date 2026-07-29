@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <android/log.h>
+#include <arm_neon.h>
 #include "hardware/zerocopy_buffer.h"
 #include "npu/qnn_depth_pipeline.h"
 #include "npu/npu_denoise_engine.h"
@@ -38,11 +39,16 @@ static std::vector<Point3D> g_accumulatedPointCloud;
 static bool g_useObjectROI = false;
 static float g_targetDepth = 0.0f;
 static float g_depthTolerance = 0.45f; // 45 cm etrafındaki objeyi izole et
+static float g_roiTargetU = 0.5f;
+static float g_roiTargetV = 0.5f;
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_magicv3_scanner3d_MainActivity_setTargetObjectROINative(JNIEnv* env, jobject /* this */, jfloat normX, jfloat normY) {
     std::lock_guard<std::mutex> lock(g_cloudMutex);
     g_useObjectROI = true;
+    g_targetDepth = 0.0f; // Force recalculation
+    g_roiTargetU = normX;
+    g_roiTargetV = normY;
     LOGI("[ROI] Target object focus enabled at U=%.2f, V=%.2f", normX, normY);
 }
 
@@ -246,15 +252,59 @@ Java_com_magicv3_scanner3d_MainActivity_processFrameNative(
         }
     }
 
-    // 2. Convert YUV to RGB for Depth Map Resolution
+    // 2. Convert YUV to RGB for Depth Map Resolution (SIMD NEON Optimized)
     if (yRaw && uRaw && vRaw && imgW > 0 && imgH > 0) {
-        for (int y = 0; y < height; ++y) {
-            for (int x = 0; x < width; ++x) {
-                int camX = std::clamp(static_cast<int>(static_cast<float>(x) / width * imgW), 0, imgW - 1);
-                int camY = std::clamp(static_cast<int>(static_cast<float>(y) / height * imgH), 0, imgH - 1);
+        // Önceden hesaplanmış çarpanlar
+        const int16x8_t c1370 = vdupq_n_s16(1371);
+        const int16x8_t c337 = vdupq_n_s16(338);
+        const int16x8_t c698 = vdupq_n_s16(698);
+        const int16x8_t c1732 = vdupq_n_s16(1732);
+        const int16x8_t const128 = vdupq_n_s16(128);
 
-                int yIdx = camY * yRowStride + camX;
-                int uvIdx = (camY / 2) * uvRowStride + (camX / 2) * uvPixelStride;
+        for (int y = 0; y < height; ++y) {
+            int camY = std::clamp(static_cast<int>(static_cast<float>(y) / height * imgH), 0, imgH - 1);
+            int yRowOffset = camY * yRowStride;
+            int uvRowOffset = (camY / 2) * uvRowStride;
+
+            // 8 piksel bloklar halinde işle
+            int x = 0;
+            for (; x <= width - 8; x += 8) {
+                int16_t yVals[8], uVals[8], vVals[8];
+                for (int i = 0; i < 8; ++i) {
+                    int camX = std::clamp(static_cast<int>(static_cast<float>(x + i) / width * imgW), 0, imgW - 1);
+                    yVals[i] = yRaw[yRowOffset + camX];
+                    uVals[i] = uRaw[uvRowOffset + (camX / 2) * uvPixelStride];
+                    vVals[i] = vRaw[uvRowOffset + (camX / 2) * uvPixelStride];
+                }
+
+                int16x8_t yV = vld1q_s16(yVals);
+                int16x8_t uV = vsubq_s16(vld1q_s16(uVals), const128);
+                int16x8_t vV = vsubq_s16(vld1q_s16(vVals), const128);
+
+                // R = Y + 1.370705 * V
+                int16x8_t rV = vqaddq_s16(yV, vshrq_n_s16(vmulq_s16(vV, c1370), 10));
+                // G = Y - 0.337633 * U - 0.698001 * V
+                int16x8_t gV = vqsubq_s16(yV, vshrq_n_s16(vqaddq_s16(vmulq_s16(uV, c337), vmulq_s16(vV, c698)), 10));
+                // B = Y + 1.732446 * U
+                int16x8_t bV = vqaddq_s16(yV, vshrq_n_s16(vmulq_s16(uV, c1732), 10));
+
+                uint8x8_t r8 = vqmovun_s16(rV);
+                uint8x8_t g8 = vqmovun_s16(gV);
+                uint8x8_t b8 = vqmovun_s16(bV);
+
+                uint8x8x3_t rgb;
+                rgb.val[0] = r8;
+                rgb.val[1] = g8;
+                rgb.val[2] = b8;
+
+                vst3_u8(&rgbImg[(y * width + x) * 3], rgb);
+            }
+
+            // Kalan pikseller (genelde genişlik 8'in katı değilse)
+            for (; x < width; ++x) {
+                int camX = std::clamp(static_cast<int>(static_cast<float>(x) / width * imgW), 0, imgW - 1);
+                int yIdx = yRowOffset + camX;
+                int uvIdx = uvRowOffset + (camX / 2) * uvPixelStride;
 
                 float yVal = static_cast<float>(yRaw[yIdx]);
                 float uVal = static_cast<float>(uRaw[uvIdx]) - 128.0f;
@@ -327,10 +377,18 @@ Java_com_magicv3_scanner3d_MainActivity_processFrameNative(
         env->ReleaseIntArrayElements(outSegmentedPixels, segPix, 0);
     }
 
-    // If ROI is requested and targetDepth is not yet locked, lock it from touch point or center
+    // If ROI is requested and targetDepth is not yet locked, lock it from touch point
     if (g_useObjectROI && g_targetDepth <= 0.0f) {
-        g_targetDepth = centerDist > 0.1f ? centerDist : 1.0f;
-        LOGI("[ROI] Auto-locked target depth to %.2f meters", g_targetDepth);
+        // UI is portrait, but depth buffer is landscape (rotated 90 clockwise in UI)
+        // landscape_X = normV * width
+        // landscape_Y = (1.0f - normU) * height
+        int targetX = std::clamp(static_cast<int>(g_roiTargetV * width), 0, width - 1);
+        int targetY = std::clamp(static_cast<int>((1.0f - g_roiTargetU) * height), 0, height - 1);
+        
+        float d = fusedOutput[targetY * width + targetX];
+        g_targetDepth = d > 0.1f ? d : (centerDist > 0.1f ? centerDist : 1.0f);
+        LOGI("[ROI] Locked target depth to %.2f meters from tap U=%.2f, V=%.2f (Mapped X=%d, Y=%d)", 
+             g_targetDepth, g_roiTargetU, g_roiTargetV, targetX, targetY);
     }
 
     // 4. If Scanning: Backproject + Compute Normals + Accumulate in C++

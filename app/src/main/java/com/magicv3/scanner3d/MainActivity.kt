@@ -55,10 +55,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.alpha
-
-
-
-
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 
 
@@ -117,8 +117,7 @@ class MainActivity : ComponentActivity() {
     private var show3dPreviewDialog by mutableStateOf(false)
     private var accumulatedPointsArray by mutableStateOf(FloatArray(0))
     private var centerDistance by mutableStateOf(0.0f)
-
-
+    private var isExporting by mutableStateOf(false)
 
 
 
@@ -377,6 +376,7 @@ class MainActivity : ComponentActivity() {
                         depthBitmap = depthBitmap,
                         segmentedBitmap = segmentedBitmap,
                         centerDistance = centerDistance,
+                        isExporting = isExporting,
                         glSurfaceView = glSurfaceView,
                         onStartScan = {
                             isScanning = true
@@ -395,16 +395,25 @@ class MainActivity : ComponentActivity() {
                             Toast.makeText(this@MainActivity, "Veriler temizlendi.", Toast.LENGTH_SHORT).show()
                         },
                         onExportMesh = {
+                            if (isExporting) return@ScannerUI
+                            isExporting = true
                             val outputPath = "${externalCacheDir?.absolutePath}/scan_model.obj"
-                            val removedCount = denoisePointCloudNative()
-                            if (removedCount > 0) {
-                                Toast.makeText(this@MainActivity, "NPU-SOR: $removedCount parazit nokta temizlendi.", Toast.LENGTH_SHORT).show()
-                            }
-                            val success = exportPointCloudMesh(outputPath)
-                            if (success) {
-                                Toast.makeText(this@MainActivity, "Model kaydedildi: $outputPath", Toast.LENGTH_LONG).show()
-                            } else {
-                                Toast.makeText(this@MainActivity, "Mesh kaydetme başarısız!", Toast.LENGTH_SHORT).show()
+                            
+                            lifecycleScope.launch(Dispatchers.IO) {
+                                val removedCount = denoisePointCloudNative()
+                                val success = exportPointCloudMesh(outputPath)
+                                
+                                withContext(Dispatchers.Main) {
+                                    isExporting = false
+                                    if (removedCount > 0) {
+                                        Toast.makeText(this@MainActivity, "NPU-SOR: $removedCount parazit nokta temizlendi.", Toast.LENGTH_SHORT).show()
+                                    }
+                                    if (success) {
+                                        Toast.makeText(this@MainActivity, "Model kaydedildi: $outputPath", Toast.LENGTH_LONG).show()
+                                    } else {
+                                        Toast.makeText(this@MainActivity, "Mesh kaydetme başarısız!", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
                             }
                         },
                         onTestFusion = {
@@ -552,6 +561,7 @@ fun ScannerUI(
     depthBitmap: Bitmap?,
     segmentedBitmap: Bitmap?,
     centerDistance: Float,
+    isExporting: Boolean,
     glSurfaceView: GLSurfaceView,
     onStartScan: () -> Unit,
     onStopScan: () -> Unit,
@@ -778,6 +788,7 @@ fun ScannerUI(
                     )
                     .alpha(if (isScanning && isTracking) pulseAlpha else 1f)
             )
+            
             Text(
                 text = trackingState,
                 color = Color.White,
@@ -877,8 +888,9 @@ fun ScannerUI(
             ScanActionButton(
                 label = null,
                 emoji = "💾",
-                enabled = !isScanning && pointCount > 0,
+                enabled = (!isScanning && pointCount > 0) || isExporting,
                 activeColor = Color(0xFF007AFF),
+                isLoading = isExporting,
                 onClick = onExportMesh
             )
 
@@ -989,27 +1001,36 @@ fun ScanActionButton(
     emoji: String?,
     enabled: Boolean,
     activeColor: Color,
+    isLoading: Boolean = false,
     onClick: () -> Unit
 ) {
-    val bg = if (enabled) activeColor.copy(alpha = 0.9f) else Color.White.copy(alpha = 0.08f)
-    val contentColor = if (enabled) Color.White else Color.White.copy(alpha = 0.25f)
+    val bg = if (enabled || isLoading) activeColor.copy(alpha = 0.9f) else Color.White.copy(alpha = 0.08f)
+    val contentColor = if (enabled || isLoading) Color.White else Color.White.copy(alpha = 0.25f)
     Box(
         modifier = Modifier
             .size(46.dp)
             .clip(CircleShape)
             .background(bg)
-            .border(1.dp, if (enabled) activeColor.copy(alpha = 0.5f) else Color.Transparent, CircleShape)
-            .clickable(enabled = enabled) { onClick() },
+            .border(1.dp, if (enabled || isLoading) activeColor.copy(alpha = 0.5f) else Color.Transparent, CircleShape)
+            .clickable(enabled = enabled && !isLoading) { onClick() },
         contentAlignment = Alignment.Center
     ) {
-        when {
-            emoji != null -> Text(emoji, fontSize = 18.sp)
-            label != null -> Text(
-                label,
-                color = contentColor,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold
+        if (isLoading) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(20.dp),
+                color = Color.White,
+                strokeWidth = 2.dp
             )
+        } else {
+            when {
+                emoji != null -> Text(emoji, fontSize = 18.sp)
+                label != null -> Text(
+                    label,
+                    color = contentColor,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
     }
 }
