@@ -56,6 +56,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.alpha
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlin.math.roundToInt
@@ -1086,37 +1087,85 @@ fun PointCloudPreviewDialog(
     points: FloatArray,
     onDismiss: () -> Unit
 ) {
+    // --- Döndürme / Zoom / Pan state ---
     var rotX by remember { mutableStateOf(-0.3f) }
     var rotY by remember { mutableStateOf(0f) }
     var zoom by remember { mutableStateOf(160f) }
+    var panX by remember { mutableStateOf(0f) }   // ekran offset X
+    var panY by remember { mutableStateOf(0f) }   // ekran offset Y
 
     val totalPoints = points.size / 3
     val lodOptions = listOf(1000, 5000, 20000, 75000, 250000)
-    var lodIndex by remember { mutableStateOf(2) } // Varsayılan 20k nokta
-
+    var lodIndex by remember { mutableStateOf(2) }
     val targetLimit = lodOptions[lodIndex]
     val step = (totalPoints / targetLimit).coerceAtLeast(1)
+
+    // --- [P01+P06] Centroid + Z aralığı (points stabil olunca 1x) ---
+    val centroidAndRange = remember(points) {
+        if (points.isEmpty()) {
+            Triple(Triple(0f, 0f, 0f), 0f, 3f)
+        } else {
+            var sx = 0f; var sy = 0f; var sz = 0f
+            var zMin = Float.MAX_VALUE
+            var zMax = -Float.MAX_VALUE
+            val n = points.size / 3
+            for (i in 0 until n) {
+                val x = points[i * 3]
+                val y = points[i * 3 + 1]
+                val z = points[i * 3 + 2]
+                sx += x; sy += y; sz += z
+                if (z < zMin) zMin = z
+                if (z > zMax) zMax = z
+            }
+            Triple(Triple(sx / n, sy / n, sz / n), zMin, zMax)
+        }
+    }
+    val centroid = centroidAndRange.first
+    val zMin = centroidAndRange.second
+    val zMax = centroidAndRange.third
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color(0xFF0A0E14))
     ) {
-        // 3D Canvas
+        // --- 3D Canvas ---
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
+                // [P02/P04] Tek-parmak pan + iki-parmak rotate/zoom ayrı
                 .pointerInput(Unit) {
-                    detectTransformGestures { _, pan, zoomFactor, _ ->
-                        rotY += pan.x * 0.008f
-                        rotX -= pan.y * 0.008f
+                    detectTransformGestures { gestureCentroid, pan, zoomFactor, _ ->
+                        // [P04] Zoom'a duyarlı rotate hassasiyeti
+                        val rotSens = 0.008f * (160f / zoom.coerceIn(40f, 700f))
+                        rotY += pan.x * rotSens
+                        rotX -= pan.y * rotSens
+
+                        // [P02] Zoom-to-cursor: pinch merkezi sabit kalsın
+                        val prevZoom = zoom
                         zoom = (zoom * zoomFactor).coerceIn(40f, 700f)
+                        val zRatio = zoom / prevZoom
+                        val cx0 = size.width / 2f
+                        val cy0 = size.height / 2f
+                        // centroid-ekran-mapping korunsun
+                        panX = gestureCentroid.x - cx0 -
+                               (gestureCentroid.x - cx0 - panX) * zRatio
+                        panY = gestureCentroid.y - cy0 -
+                               (gestureCentroid.y - cy0 - panY) * zRatio
+                    }
+                }
+                // [P02 ek] Tek-parmak serbest pan (rotate'siz kaydırma)
+                .pointerInput(Unit) {
+                    detectDragGestures { drag, _ ->
+                        // Tek parmak = kaydır; iki parmak zaten üst pointer'da
+                        // (sadece transform olmayan tek-parmak drag yakalanır)
+                        panX += drag.x
+                        panY += drag.y
                     }
                 }
         ) {
             val cx = size.width / 2f
             val cy = size.height / 2f
-
             val cosX = kotlin.math.cos(rotX.toDouble()).toFloat()
             val sinX = kotlin.math.sin(rotX.toDouble()).toFloat()
             val cosY = kotlin.math.cos(rotY.toDouble()).toFloat()
@@ -1125,39 +1174,65 @@ fun PointCloudPreviewDialog(
             // Grid zemin
             val gridColor = Color.White.copy(alpha = 0.04f)
             for (i in -10..10) {
-                drawLine(gridColor, Offset(0f, cy + i * 40f), Offset(size.width, cy + i * 40f), strokeWidth = 1f)
-                drawLine(gridColor, Offset(cx + i * 40f, 0f), Offset(cx + i * 40f, size.height), strokeWidth = 1f)
+                drawLine(
+                    gridColor,
+                    Offset(panX, cy + panY + i * 40f),
+                    Offset(size.width, cy + panY + i * 40f),
+                    strokeWidth = 1f
+                )
+                drawLine(
+                    gridColor,
+                    Offset(cx + panX + i * 40f, 0f),
+                    Offset(cx + panX + i * 40f, size.height),
+                    strokeWidth = 1f
+                )
             }
 
-            for (i in 0 until totalPoints step step) {
-                val px = points[i * 3 + 0]
-                val py = points[i * 3 + 1]
-                val pz = points[i * 3 + 2]
+            // [P03] Near-plane: zoom'a göre güvenli alt sınır
+            val nearPlane = 0.6f
+            val W = size.width
+            val H = size.height
 
+            // [P05] Adaptif nokta çapı
+            val ptRadius = (1.8f * (zoom / 160f)).coerceIn(0.6f, 5f)
+
+            for (i in 0 until totalPoints step step) {
+                // [P01] Centroid'e taşı
+                val px = points[i * 3]     - centroid.first
+                val py = points[i * 3 + 1] - centroid.second
+                val pz = points[i * 3 + 2] - centroid.third
+
+                // X ekseni etrafında döndür
                 val y1 = py * cosX - pz * sinX
                 val z1 = py * sinX + pz * cosX
+                // Y ekseni etrafında döndür
                 val x2 = px * cosY + z1 * sinY
                 val z2 = -px * sinY + z1 * cosY
 
+                // Perspektif
                 val dist = 3.0f
                 val projZ = z2 + dist
-                if (projZ > 0.2f) {
-                    val sx = cx + (x2 * zoom) / projZ
-                    val sy = cy - (y1 * zoom) / projZ
-
-                    val t = (pz / 3.0f).coerceIn(0f, 1f)
-                    val ptColor = Color(
-                        red   = t * 0.9f,
-                        green = (1f - t) * 0.9f + 0.1f,
-                        blue  = 0.9f - t * 0.4f,
-                        alpha = 0.92f
-                    )
-                    drawCircle(ptColor, radius = 1.8f, center = Offset(sx, sy))
+                if (projZ > nearPlane) {
+                    val sx = cx + panX + (x2 * zoom) / projZ
+                    val sy = cy + panY - (y1 * zoom) / projZ
+                    // [P03] Ekran dışı culling (dev daire çizmeyi engelle)
+                    if (sx in -W..(2 * W) && sy in -H..(2 * H)) {
+                        // [P06] Dinamik derinlik renk skalası
+                        val t = ((points[i * 3 + 2] - zMin) /
+                                 (zMax - zMin + 1e-6f)).coerceIn(0f, 1f)
+                        val ptColor = Color(
+                            red   = t * 0.9f,
+                            green = (1f - t) * 0.9f + 0.1f,
+                            blue  = 0.9f - t * 0.4f,
+                            alpha  = 0.92f
+                        )
+                        drawCircle(ptColor, radius = ptRadius, center = Offset(sx, sy))
+                    }
                 }
             }
         }
 
-        // Üst Bilgi Barı
+        // --- Üst Bilgi Barı ---
         Row(
             modifier = Modifier
                 .align(Alignment.TopCenter)
@@ -1168,21 +1243,15 @@ fun PointCloudPreviewDialog(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text(
-                "💫 3D Önİzleme",
-                color = Color.White,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Box(Modifier.width(1.dp).height(14.dp).background(Color.White.copy(alpha = 0.2f)))
-            Text(
-                "${totalPoints} nokta  •  ${totalPoints / step} gösterilen",
-                color = Color.White.copy(alpha = 0.7f),
-                fontSize = 11.sp
-            )
+            Text("💫 3D Önİzleme", color = Color.White, fontSize = 14.sp,
+                fontWeight = FontWeight.Bold)
+            Box(Modifier.width(1.dp).height(14.dp)
+                .background(Color.White.copy(alpha = 0.2f)))
+            Text("${totalPoints} nokta • ${totalPoints / step} gösterilen",
+                color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp)
         }
 
-        // B13: LOD (Detail Level) Slider
+        // --- LOD Slider ---
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -1193,12 +1262,8 @@ fun PointCloudPreviewDialog(
                 .padding(horizontal = 16.dp, vertical = 6.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text(
-                text = "Detay Seviyesi: ${lodOptions[lodIndex]} nokta",
-                color = Color.White,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold
-            )
+            Text("Detay Seviyesi: ${lodOptions[lodIndex]} nokta",
+                color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
             Slider(
                 value = lodIndex.toFloat(),
                 onValueChange = { lodIndex = it.roundToInt() },
@@ -1212,9 +1277,9 @@ fun PointCloudPreviewDialog(
             )
         }
 
-        // İpUcu
+        // --- İpucu ---
         Text(
-            text = "Sürükle: Döndür  •  Kistır: Yakınlaştır",
+            "Tek parmak: Kaydır • İki parmak: Döndür + Yakınlaştır",
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 95.dp)
@@ -1224,7 +1289,7 @@ fun PointCloudPreviewDialog(
             fontSize = 11.sp
         )
 
-        // Kapat Butonu
+        // --- Kapat ---
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -1239,12 +1304,8 @@ fun PointCloudPreviewDialog(
                 .clickable { onDismiss() },
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                "←  Kapat",
-                color = Color.White,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold
-            )
+            Text("← Kapat", color = Color.White,
+                fontSize = 15.sp, fontWeight = FontWeight.Bold)
         }
     }
 }
