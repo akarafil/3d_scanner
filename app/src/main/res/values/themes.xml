@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- B08: Legacy Theme vs Material 3 Çakışması Çözümü -->
+    <style name="Theme.Magic3DScanner" parent="android:Theme.Material.NoActionBar">
+        <!-- Pencere arka planı ve durum çubuğu renklerini koyu sRGB arayüze eşitle -->
+        <item name="android:windowBackground">#FF0A0E14</item>
+        <item name="android:statusBarColor">#FF0A0E14</item>
+        <item name="android:navigationBarColor">#FF0A0E14</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+    </style>
+</resources>

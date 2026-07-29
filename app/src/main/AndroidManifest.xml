@@ -15,7 +15,7 @@
         android:icon="@mipmap/ic_launcher"
         android:label="Magic 3D Scanner"
         android:hardwareAccelerated="true"
-        android:theme="@android:style/Theme.Material.NoActionBar">
+        android:theme="@style/Theme.Magic3DScanner">
 
         <meta-data android:name="com.google.ar.core" android:value="required" />
 
@@ -24,7 +24,7 @@
             android:exported="true"
             android:resizeableActivity="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|density|fontScale|uiMode"
-            android:theme="@android:style/Theme.Material.NoActionBar">
+            android:theme="@style/Theme.Magic3DScanner">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

@@ -59,6 +59,15 @@ void BindThreadToCores(ThreadRole role) {
             LOGI("Thread pinned to dynamically detected Prime Core (%d)", primeCore);
             break;
         }
+        case ThreadRole::ALL_CORES: {
+            int numCores = sysconf(_SC_NPROCESSORS_CONF);
+            if (numCores <= 0) numCores = 8;
+            for (int i = 0; i < numCores; ++i) {
+                CPU_SET(i, &cpuset);
+            }
+            LOGI("Thread affinity reset to all cores (total %d)", numCores);
+            break;
+        }
     }
 
     sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);

@@ -107,6 +107,10 @@ Java_com_magicv3_scanner3d_MainActivity_exportPointCloudMesh(JNIEnv* env, jobjec
     }
 
     bool success = g_poissonRecon.GenerateMeshFromPointCloud(localCloudCopy, outPath);
+
+    // R04: Export bittikten sonra Prime Core (Cortex-X4) affinity kilidini serbest bırak
+    BindThreadToCores(ThreadRole::ALL_CORES);
+
     return static_cast<jboolean>(success);
 }
 

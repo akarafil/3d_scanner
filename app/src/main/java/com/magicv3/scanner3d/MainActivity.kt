@@ -58,6 +58,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.alpha
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
+import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -109,8 +110,15 @@ class MainActivity : ComponentActivity() {
     private var segmentedBitmap by mutableStateOf<Bitmap?>(null)
     private var depthPixels: IntArray? = null
     private var segmentedPixels: IntArray? = null
-    private var cachedRawDBmp: Bitmap? = null // B03: Pre-allocated depth bitmap
-    private var cachedRawSBmp: Bitmap? = null // B03: Pre-allocated segmented bitmap
+    
+    // R02: Ping-Pong Bitmap Havuzu (Compose recomposition tetiklemek için)
+    private var bmpA_d: Bitmap? = null
+    private var bmpB_d: Bitmap? = null
+    private var useA_d = true
+
+    private var bmpA_s: Bitmap? = null
+    private var bmpB_s: Bitmap? = null
+    private var useA_s = true
     private var lastPreviewUpdateTime = 0L
     private var show3dPreviewDialog by mutableStateOf(false)
     private var accumulatedPointsArray by mutableStateOf(FloatArray(0))
@@ -302,18 +310,28 @@ class MainActivity : ComponentActivity() {
                 val bmpW = height
                 val bmpH = width
 
-                if (cachedRawDBmp == null || cachedRawDBmp!!.width != bmpW || cachedRawDBmp!!.height != bmpH) {
-                    cachedRawDBmp = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
-                    cachedRawSBmp = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
+                // R02: Ping-Pong Bitmap Havuzunu Initialize Et
+                if (bmpA_d == null || bmpA_d!!.width != bmpW || bmpA_d!!.height != bmpH) {
+                    bmpA_d = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
+                    bmpB_d = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
+                    bmpA_s = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
+                    bmpB_s = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
                 }
 
-                cachedRawDBmp!!.setPixels(dPix, 0, bmpW, 0, 0, bmpW, bmpH)
-                cachedRawSBmp!!.setPixels(sPix!!, 0, bmpW, 0, 0, bmpW, bmpH)
+                // Alternatif olarak A ve B bitmap'lerini kullan (Referans değişimi Compose tetikler)
+                val curDepthBmp = if (useA_d) bmpA_d!! else bmpB_d!!
+                val curSegBmp = if (useA_s) bmpA_s!! else bmpB_s!!
+
+                curDepthBmp.setPixels(dPix, 0, bmpW, 0, 0, bmpW, bmpH)
+                curSegBmp.setPixels(sPix!!, 0, bmpW, 0, 0, bmpW, bmpH)
 
                 runOnUiThread {
-                    depthBitmap = cachedRawDBmp
-                    segmentedBitmap = cachedRawSBmp
+                    depthBitmap = curDepthBmp
+                    segmentedBitmap = curSegBmp
                 }
+
+                useA_d = !useA_d
+                useA_s = !useA_s
             }
 
             if (currentTime - lastUiUpdateTime > 500) {
@@ -411,6 +429,7 @@ class MainActivity : ComponentActivity() {
                         onExportMesh = {
                             if (isExporting) return@ScannerUI
                             isExporting = true
+                            val wasScanning = isScanning
                             isScanning = false // B05: Export esnasında yeni nokta birikmesini durdur
                             val outputPath = "${externalCacheDir?.absolutePath}/scan_model.obj"
                             
@@ -420,6 +439,7 @@ class MainActivity : ComponentActivity() {
                                 
                                 withContext(Dispatchers.Main) {
                                     isExporting = false
+                                    isScanning = wasScanning // R03: Tarama durumunu geri yükle
                                     if (removedCount > 0) {
                                         Toast.makeText(this@MainActivity, "NPU-SOR: $removedCount parazit nokta temizlendi.", Toast.LENGTH_SHORT).show()
                                     }
@@ -782,6 +802,10 @@ fun ScannerUI(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .padding(top = 16.dp)
+                .clickable(
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                    indication = null
+                ) {}
                 .background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(32.dp))
                 .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(32.dp))
                 .padding(horizontal = 18.dp, vertical = 10.dp),
@@ -843,6 +867,10 @@ fun ScannerUI(
             modifier = Modifier
                 .align(Alignment.CenterStart)
                 .padding(start = 12.dp)
+                .clickable(
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                    indication = null
+                ) {}
         ) {
             DistanceGuide(distance = centerDistance)
         }
@@ -852,6 +880,10 @@ fun ScannerUI(
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .padding(end = 12.dp)
+                .clickable(
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                    indication = null
+                ) {}
                 .background(Color.Black.copy(alpha = 0.68f), RoundedCornerShape(32.dp))
                 .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(32.dp))
                 .padding(vertical = 20.dp, horizontal = 10.dp),
@@ -1059,7 +1091,11 @@ fun PointCloudPreviewDialog(
     var zoom by remember { mutableStateOf(160f) }
 
     val totalPoints = points.size / 3
-    val step = (totalPoints / 3000).coerceAtLeast(1)
+    val lodOptions = listOf(1000, 5000, 20000, 75000, 250000)
+    var lodIndex by remember { mutableStateOf(2) } // Varsayılan 20k nokta
+
+    val targetLimit = lodOptions[lodIndex]
+    val step = (totalPoints / targetLimit).coerceAtLeast(1)
 
     Box(
         modifier = Modifier
@@ -1146,12 +1182,42 @@ fun PointCloudPreviewDialog(
             )
         }
 
+        // B13: LOD (Detail Level) Slider
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 145.dp)
+                .width(260.dp)
+                .background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(16.dp))
+                .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(16.dp))
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = "Detay Seviyesi: ${lodOptions[lodIndex]} nokta",
+                color = Color.White,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Slider(
+                value = lodIndex.toFloat(),
+                onValueChange = { lodIndex = it.roundToInt() },
+                valueRange = 0f..(lodOptions.size - 1).toFloat(),
+                steps = lodOptions.size - 2,
+                colors = SliderDefaults.colors(
+                    thumbColor = Color(0xFF00FFCC),
+                    activeTrackColor = Color(0xFF00FFCC),
+                    inactiveTrackColor = Color.White.copy(alpha = 0.2f)
+                )
+            )
+        }
+
         // İpUcu
         Text(
             text = "Sürükle: Döndür  •  Kistır: Yakınlaştır",
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 90.dp)
+                .padding(bottom = 95.dp)
                 .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
                 .padding(horizontal = 14.dp, vertical = 6.dp),
             color = Color.White.copy(alpha = 0.6f),
