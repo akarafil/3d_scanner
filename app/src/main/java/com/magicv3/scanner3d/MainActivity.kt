@@ -17,6 +17,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -76,6 +78,8 @@ class MainActivity : ComponentActivity() {
         imgW: Int, imgH: Int,
         isScanning: Boolean
     ): Float
+    private external fun setTargetObjectROINative(normX: Float, normY: Float)
+    private external fun clearTargetObjectROINative()
     private external fun initNativeEngine(): Boolean
     private external fun bindThreadAffinity(roleIndex: Int)
 
@@ -359,6 +363,7 @@ class MainActivity : ComponentActivity() {
                                 onClearScan = {
                                     isScanning = false
                                     clearAccumulatedPoints()
+                                    clearTargetObjectROINative()
                                     pointCount = 0
                                     Toast.makeText(this@MainActivity, "Tarama verileri temizlendi.", Toast.LENGTH_SHORT).show()
                                 },
@@ -398,6 +403,9 @@ class MainActivity : ComponentActivity() {
                                     } else {
                                         Toast.makeText(this@MainActivity, "Önizlenecek nokta yok!", Toast.LENGTH_SHORT).show()
                                     }
+                                },
+                                onSetTargetROI = { normU, normV ->
+                                    setTargetObjectROINative(normU, normV)
                                 }
                             )
                         }
@@ -528,9 +536,12 @@ fun ScannerUI(
     onClearScan: () -> Unit,
     onExportMesh: () -> Unit,
     onTestFusion: () -> Unit,
-    onShowPreview3D: () -> Unit
+    onShowPreview3D: () -> Unit,
+    onSetTargetROI: (Float, Float) -> Unit
 ) {
     val isTracking = trackingState.startsWith("Aktif")
+    var showMultiCamMode by remember { mutableStateOf(true) }
+    var roiTargetPoint by remember { mutableStateOf<Offset?>(null) }
 
     // Tarama animasyonu
     val infiniteTransition = rememberInfiniteTransition(label = "scan_pulse")
@@ -542,7 +553,93 @@ fun ScannerUI(
         label = "pulse"
     )
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {
+                detectTapGestures { offset ->
+                    roiTargetPoint = offset
+                    val normU = offset.x / size.width.toFloat()
+                    val normV = offset.y / size.height.toFloat()
+                    onSetTargetROI(normU, normV)
+                }
+            }
+    ) {
+
+        // ── 3 KAMERA HİBRİT PANEL DÜZENİ ───────────────────
+        if (showMultiCamMode) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    // Panel 1: Ana RGB Kamera
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .border(1.dp, Color(0xFF00FFCC).copy(alpha = 0.5f))
+                            .background(Color.Black.copy(alpha = 0.3f))
+                    ) {
+                        Text(
+                            "📷 ANA KAMERA (RGB)",
+                            color = Color(0xFF00FFCC),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(6.dp)
+                        )
+                    }
+
+                    // Panel 2: Derinlik / İzolasyon Haritası
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .border(1.dp, Color(0xFFFF3366).copy(alpha = 0.5f))
+                            .background(Color.Black.copy(alpha = 0.4f))
+                    ) {
+                        Text(
+                            "🎯 ODAK & DERİNLİK MASKESİ",
+                            color = Color(0xFFFF3366),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(6.dp)
+                        )
+                    }
+                }
+
+                // Panel 3: Geniş Açı / Obje İzolasyonu
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(110.dp)
+                        .border(1.dp, Color(0xFF007AFF).copy(alpha = 0.5f))
+                        .background(Color.Black.copy(alpha = 0.5f))
+                ) {
+                    Text(
+                        "🔍 ULTRA-WIDE / SEÇİLİ OBJE İZOLASYONU",
+                        color = Color(0xFF007AFF),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(6.dp)
+                    )
+                }
+            }
+        }
+
+        // ── Obje Seçim İmleci (ROI Focus Target Indicator) ─────────
+        roiTargetPoint?.let { pos ->
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                drawCircle(
+                    color = Color(0xFF00FFCC),
+                    radius = 28f,
+                    center = pos,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f)
+                )
+                drawCircle(
+                    color = Color(0xFFFF3366),
+                    radius = 8f,
+                    center = pos
+                )
+            }
+        }
 
         // ── Merkez Crosshair ────────────────────────────────
         Canvas(

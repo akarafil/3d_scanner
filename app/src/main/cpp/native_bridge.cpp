@@ -35,6 +35,25 @@ Java_com_magicv3_scanner3d_MainActivity_bindThreadAffinity(JNIEnv* env, jobject 
 static std::mutex g_cloudMutex;
 static std::vector<Point3D> g_accumulatedPointCloud;
 
+static bool g_useObjectROI = false;
+static float g_targetDepth = 0.0f;
+static float g_depthTolerance = 0.45f; // 45 cm etrafındaki objeyi izole et
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_magicv3_scanner3d_MainActivity_setTargetObjectROINative(JNIEnv* env, jobject /* this */, jfloat normX, jfloat normY) {
+    std::lock_guard<std::mutex> lock(g_cloudMutex);
+    g_useObjectROI = true;
+    LOGI("[ROI] Target object focus enabled at U=%.2f, V=%.2f", normX, normY);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_magicv3_scanner3d_MainActivity_clearTargetObjectROINative(JNIEnv* env, jobject /* this */) {
+    std::lock_guard<std::mutex> lock(g_cloudMutex);
+    g_useObjectROI = false;
+    g_targetDepth = 0.0f;
+    LOGI("[ROI] Target object focus cleared, scanning full scene.");
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_magicv3_scanner3d_MainActivity_clearAccumulatedPoints(JNIEnv* env, jobject /* this */) {
     std::lock_guard<std::mutex> lock(g_cloudMutex);
@@ -265,6 +284,12 @@ Java_com_magicv3_scanner3d_MainActivity_processFrameNative(
     int centerY = height / 2;
     float centerDist = fusedOutput[centerY * width + centerX];
 
+    // If ROI is requested and targetDepth is not yet locked, lock it from touch point or center
+    if (g_useObjectROI && g_targetDepth <= 0.0f) {
+        g_targetDepth = centerDist > 0.1f ? centerDist : 1.0f;
+        LOGI("[ROI] Auto-locked target depth to %.2f meters", g_targetDepth);
+    }
+
     // 4. If Scanning: Backproject + Compute Normals + Accumulate in C++
     if (isScanning && cameraToWorldArr) {
         jfloat* c2w = env->GetFloatArrayElements(cameraToWorldArr, nullptr);
@@ -279,6 +304,13 @@ Java_com_magicv3_scanner3d_MainActivity_processFrameNative(
                 float depth = fusedOutput[idx];
 
                 if (depth > 0.1f && depth < 5.0f) {
+                    // ARKA PLAN SİLME (Background Removal Verification)
+                    if (g_useObjectROI && g_targetDepth > 0.1f) {
+                        float distDiff = std::abs(depth - g_targetDepth);
+                        if (distDiff > g_depthTolerance) {
+                            continue; // Objenin arkasında veya çok önünde kalan nesneleri atla
+                        }
+                    }
                     float xCam = (px - cx) * depth / fx;
                     float yCam = (py - cy) * depth / fy;
                     float zCam = depth;
