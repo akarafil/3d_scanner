@@ -27,6 +27,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.magicv3.scanner3d.infra.permission.CameraPermissionState
 import com.magicv3.scanner3d.infra.permission.rememberCameraPermissionState
+import com.magicv3.scanner3d.ui.scan.ScanScreen
 import com.magicv3.scanner3d.ui.theme.MagicScannerTheme
 
 class MainActivity : ComponentActivity() {
@@ -49,11 +50,11 @@ class MainActivity : ComponentActivity() {
 /**
  * Uygulama kök Composable — izin state'e göre router.
  *
- * 4 durum cover (CameraPermissionState):
- *   NOT_REQUESTED       → Onboarding + "Kamera İzni Ver" butonu
- *   GRANTED             → Kamera hazır placeholder (Phase 1.2'de ScanScreen olur)
+ * 4 durum (CameraPermissionState):
+ *   NOT_REQUESTED       → Onboarding + "Kamera İzni Ver"
+ *   GRANTED             → ScanScreen (kamera preview host)  ← Phase 1.2
  *   DENIED              → "Tekrar Dene" ekranı
- *   PERMANENTLY_DENIED  → Ayarlara yönlendirme ekranı
+ *   PERMANENTLY_DENIED  → Ayarlara yönlendirme
  */
 @Composable
 fun MagicScannerApp() {
@@ -65,7 +66,7 @@ fun MagicScannerApp() {
             onRequest = permission.requestPermission
         )
 
-        CameraPermissionState.GRANTED -> CameraReadyPlaceholderScreen()
+        CameraPermissionState.GRANTED -> ScanScreen()
 
         CameraPermissionState.DENIED -> PermissionDeniedScreen(
             onRetry = permission.requestPermission
@@ -75,7 +76,7 @@ fun MagicScannerApp() {
     }
 }
 
-// ── Ekranlar ───────────────────────────────────────────────────────────
+// ── İzin Ekranları ────────────────────────────────────────────────────────
 
 @Composable
 private fun PermissionRequestScreen(onRequest: () -> Unit) {
@@ -102,22 +103,6 @@ private fun PermissionRequestScreen(onRequest: () -> Unit) {
             Spacer(Modifier.height(24.dp))
             Button(onClick = onRequest) { Text("Kamera İzni Ver") }
         }
-    }
-}
-
-@Composable
-private fun CameraReadyPlaceholderScreen() {
-    // Phase 1.2'de buraya ScanScreen gelecek — şimdilik landmark.
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            "Kamera hazır —\nÖnizleme Phase 1.2'de eklenecek",
-            style = MaterialTheme.typography.bodyLarge,
-            textAlign = TextAlign.Center,
-            color = MaterialTheme.colorScheme.onBackground
-        )
     }
 }
 
