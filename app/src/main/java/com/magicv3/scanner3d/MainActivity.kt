@@ -1156,11 +1156,11 @@ fun PointCloudPreviewDialog(
                 }
                 // [P02 ek] Tek-parmak serbest pan (rotate'siz kaydırma)
                 .pointerInput(Unit) {
-                    detectDragGestures { drag, _ ->
+                    detectDragGestures { change, dragAmount ->
                         // Tek parmak = kaydır; iki parmak zaten üst pointer'da
                         // (sadece transform olmayan tek-parmak drag yakalanır)
-                        panX += drag.x
-                        panY += drag.y
+                        panX += dragAmount.x
+                        panY += dragAmount.y
                     }
                 }
         ) {
