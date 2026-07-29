@@ -81,43 +81,19 @@ class CameraRenderer(
      *   Daha büyük eksen normalize edilir → kırpma ofsetleri hesaplanır.
      *   Sonuç: görüntü asla gerilmez, ortadan kırpılır.
      */
-    private fun buildCropTextureCoords(
-        surfW: Int, surfH: Int,
-        camW: Int,  camH: Int
-    ): FloatArray {
-        val screenAspect = surfW.toFloat() / surfH.toFloat()
-        val cameraAspect = camW.toFloat()  / camH.toFloat()
-
-        var u0 = 0f; var u1 = 1f
-        var v0 = 0f; var v1 = 1f
-
-        if (cameraAspect > screenAspect) {
-            // Kamera daha geniş → yatay kırp
-            val scale = screenAspect / cameraAspect
-            val offset = (1f - scale) / 2f
-            u0 = offset; u1 = 1f - offset
-        } else {
-            // Kamera daha uzun → dikey kırp
-            val scale = cameraAspect / screenAspect
-            val offset = (1f - scale) / 2f
-            v0 = offset; v1 = 1f - offset
-        }
-
-        // Quad sırası: BL, BR, TL, TR
-        return floatArrayOf(
-            u0, v1,
-            u1, v1,
-            u0, v0,
-            u1, v0
-        )
+    private val quadUv = floatArrayOf(
+        0f, 1f,
+        1f, 1f,
+        0f, 0f,
+        1f, 0f
+    )
+    private val quadUvBuffer: FloatBuffer = ByteBuffer.allocateDirect(quadUv.size * 4).run {
+        order(ByteOrder.nativeOrder())
+        asFloatBuffer().apply { put(quadUv); position(0) }
     }
-
-    private fun updateTextureBuffer() {
-        val coords = buildCropTextureCoords(surfaceWidth, surfaceHeight, cameraWidth, cameraHeight)
-        textureBuffer = ByteBuffer.allocateDirect(coords.size * 4).run {
-            order(ByteOrder.nativeOrder())
-            asFloatBuffer().apply { put(coords); position(0) }
-        }
+    private val transformedUvBuffer: FloatBuffer = ByteBuffer.allocateDirect(quadUv.size * 4).run {
+        order(ByteOrder.nativeOrder())
+        asFloatBuffer()
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
@@ -147,9 +123,6 @@ class CameraRenderer(
             asFloatBuffer().apply { put(vertices); position(0) }
         }
 
-        // Başlangıç texture buffer (yüzey bilinmeden, 4:3 varsayım)
-        updateTextureBuffer()
-
         // Shader programı
         val vs = loadShader(GLES20.GL_VERTEX_SHADER,   vertexShaderCode)
         val fs = loadShader(GLES20.GL_FRAGMENT_SHADER, fragmentShaderCode)
@@ -172,11 +145,8 @@ class CameraRenderer(
         surfaceWidth  = max(width,  1)
         surfaceHeight = max(height, 1)
 
-        // Doğru rotasyon ile geometry set et
+        // ARCore geometry rotasyonu
         session.setDisplayGeometry(displayRotation, width, height)
-
-        // Texture crop koordinatlarını ekrana göre yeniden hesapla
-        updateTextureBuffer()
     }
 
     override fun onDrawFrame(gl: GL10?) {
@@ -191,13 +161,16 @@ class CameraRenderer(
 
         GLES20.glUseProgram(program)
 
+        // ARCore OES UV koordinatlarını otomatik dönüştür
+        frame.transformDisplayUvCoords(quadUvBuffer, transformedUvBuffer)
+
         val posHandle = GLES20.glGetAttribLocation(program, "position")
         GLES20.glEnableVertexAttribArray(posHandle)
         GLES20.glVertexAttribPointer(posHandle, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer)
 
         val texHandle = GLES20.glGetAttribLocation(program, "inputTextureCoordinate")
         GLES20.glEnableVertexAttribArray(texHandle)
-        GLES20.glVertexAttribPointer(texHandle, 2, GLES20.GL_FLOAT, false, 0, textureBuffer)
+        GLES20.glVertexAttribPointer(texHandle, 2, GLES20.GL_FLOAT, false, 0, transformedUvBuffer)
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)

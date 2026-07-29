@@ -592,8 +592,8 @@ fun ScannerUI(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(top = 70.dp, bottom = 20.dp, start = 8.dp, end = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+                .padding(top = 65.dp, bottom = 12.dp, start = 4.dp, end = 60.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             // ÜST SIRA (2 EŞİT KART: RGB KAMERA vs DERİNLİK MASKESİ)
             Row(
@@ -646,7 +646,7 @@ fun ScannerUI(
                             androidx.compose.foundation.Image(
                                 bitmap = bmp.asImageBitmap(),
                                 contentDescription = null,
-                                contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                                 modifier = Modifier.fillMaxSize()
                             )
                         } ?: Text(
@@ -686,7 +686,7 @@ fun ScannerUI(
                         androidx.compose.foundation.Image(
                             bitmap = bmp.asImageBitmap(),
                             contentDescription = null,
-                            contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                             modifier = Modifier.fillMaxSize()
                         )
                     } ?: Text(
