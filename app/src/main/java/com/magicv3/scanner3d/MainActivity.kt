@@ -285,57 +285,6 @@ class MainActivity : ComponentActivity() {
                     centerDistance = avgDist
                 }
             }
-
-            val currentMs = System.currentTimeMillis()
-            if (currentMs - lastPreviewUpdateTime > 100) {
-                lastPreviewUpdateTime = currentMs
-                try {
-                    val cx = width / 2
-                    val cy = height / 2
-                    var sum = 0.0f
-                    var count = 0
-                    for (dy in -3..3) {
-                        for (dx in -3..3) {
-                            val px = cx + dx
-                            val py = cy + dy
-                            if (px in 0 until width && py in 0 until height) {
-                                val d = fusedOutput[py * width + px]
-                                if (d > 0.1f && d < 5.0f) {
-                                    sum += d
-                                    count++
-                                }
-                            }
-                        }
-                    }
-                    val avgDist = if (count > 0) sum / count else 0.0f
-                    runOnUiThread {
-                        centerDistance = avgDist
-                    }
-
-                    val previewBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                    val pixels = IntArray(width * height)
-                    for (i in 0 until width * height) {
-                        val d = fusedOutput[i]
-                        if (d <= 0.1f) {
-                            pixels[i] = AndroidColor.BLACK
-                        } else {
-                            val norm = ((d - 0.1f) / (3.0f - 0.1f)).coerceIn(0.0f, 1.0f)
-                            val hue = (1.0f - norm) * 240.0f
-                            pixels[i] = AndroidColor.HSVToColor(floatArrayOf(hue, 1.0f, 1.0f))
-                        }
-                    }
-                    previewBitmap.setPixels(pixels, 0, width, 0, 0, width, height)
-                    runOnUiThread {
-                        depthBitmap = previewBitmap
-                    }
-                } catch (e: Exception) {
-                    android.util.Log.e("MainActivity", "Preview render error", e)
-                }
-            }
-
-            if (System.currentTimeMillis() % 1000 < 50) {
-                android.util.Log.i("MainActivity", "ARCore Depth Map Fused: w=$width, h=$height, first_pixel_val=${fusedOutput[0]}m")
-            }
         } catch (e: Exception) {
             android.util.Log.e("MainActivity", "ARCore Frame exception", e)
             runOnUiThread {
