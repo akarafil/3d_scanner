@@ -75,4 +75,7 @@ dependencies {
     // Coroutines & Lifecycle
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")
     implementation(libs.androidx.lifecycle.runtime.ktx)
+
+    // WindowManager (Foldable support)
+    implementation("androidx.window:window:1.3.0")
 }

@@ -114,21 +114,18 @@ Java_com_magicv3_scanner3d_MainActivity_addPointsToAccumulator(
 
 extern "C" JNIEXPORT jfloatArray JNICALL
 Java_com_magicv3_scanner3d_MainActivity_getAccumulatedPoints(JNIEnv* env, jobject /* this */) {
-    std::vector<Point3D> localCopy;
+    const Point3D* srcPtr;
+    size_t count;
     {
         std::lock_guard<std::mutex> lock(g_cloudMutex);
-        localCopy = g_accumulatedPointCloud;
+        srcPtr = g_accumulatedPointCloud.data();
+        count  = g_accumulatedPointCloud.size();
+    } // <- Lock burada bırakılır
+    
+    jfloatArray result = env->NewFloatArray(count * 3);
+    if (count > 0) {
+        env->SetFloatArrayRegion(result, 0, count * 3, reinterpret_cast<const jfloat*>(srcPtr));
     }
-
-    int size = localCopy.size();
-    jfloatArray result = env->NewFloatArray(size * 3);
-    jfloat* body = env->GetFloatArrayElements(result, nullptr);
-    for (int i = 0; i < size; ++i) {
-        body[i * 3 + 0] = localCopy[i].x;
-        body[i * 3 + 1] = localCopy[i].y;
-        body[i * 3 + 2] = localCopy[i].z;
-    }
-    env->ReleaseFloatArrayElements(result, body, 0);
     return result;
 }
 

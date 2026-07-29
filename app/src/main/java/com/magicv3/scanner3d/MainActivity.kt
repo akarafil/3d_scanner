@@ -21,6 +21,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -341,10 +342,22 @@ class MainActivity : ComponentActivity() {
         checkCameraPermission()
 
         setContent {
-            MaterialTheme {
+            val context = LocalContext.current
+            val colorScheme = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                dynamicDarkColorScheme(context)
+            } else {
+                darkColorScheme(
+                    primary = Color(0xFF00FFCC),
+                    secondary = Color(0xFFFF3366),
+                    background = Color(0xFF0A0E14),
+                    surface = Color(0xFF161B22)
+                )
+            }
+
+            MaterialTheme(colorScheme = colorScheme) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = Color.Black
+                    color = MaterialTheme.colorScheme.background
                 ) {
                     val rotation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                         display?.rotation ?: Surface.ROTATION_0
@@ -415,12 +428,16 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         onShowPreview3D = {
-                            val pts = getAccumulatedPoints()
-                            if (pts.isNotEmpty()) {
-                                accumulatedPointsArray = pts
-                                show3dPreviewDialog = true
-                            } else {
-                                Toast.makeText(this@MainActivity, "Önizlenecek nokta yok!", Toast.LENGTH_SHORT).show()
+                            lifecycleScope.launch(Dispatchers.IO) {
+                                val pts = getAccumulatedPoints()
+                                withContext(Dispatchers.Main) {
+                                    if (pts.isNotEmpty()) {
+                                        accumulatedPointsArray = pts
+                                        show3dPreviewDialog = true
+                                    } else {
+                                        Toast.makeText(this@MainActivity, "Önizlenecek nokta yok!", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
                             }
                         },
                         onSetTargetROI = { normU, normV ->
@@ -714,13 +731,13 @@ fun ScannerUI(
             Canvas(modifier = Modifier.fillMaxSize()) {
                 drawCircle(
                     color = Color(0xFF00FFCC),
-                    radius = 28f,
+                    radius = 48f,
                     center = pos,
-                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f)
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 5f)
                 )
                 drawCircle(
                     color = Color(0xFFFF3366),
-                    radius = 8f,
+                    radius = 12f,
                     center = pos
                 )
             }
