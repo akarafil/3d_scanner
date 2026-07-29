@@ -84,8 +84,6 @@ class MainActivity : ComponentActivity() {
     private external fun setTargetObjectROINative(normX: Float, normY: Float)
     private external fun clearTargetObjectROINative()
     private external fun initNativeEngine(): Boolean
-    private external fun bindThreadAffinity(roleIndex: Int)
-
     private external fun exportPointCloudMesh(filePath: String): Boolean
     // NPU Parazit Temizleme — Temporal buffer sıfırlama
     private external fun clearTemporalBuffer()
@@ -97,6 +95,8 @@ class MainActivity : ComponentActivity() {
         init {
             System.loadLibrary("magic3d_engine")
         }
+        @JvmStatic
+        external fun bindThreadAffinity(roleIndex: Int)
     }
 
     private var arSession: Session? = null
@@ -109,6 +109,8 @@ class MainActivity : ComponentActivity() {
     private var segmentedBitmap by mutableStateOf<Bitmap?>(null)
     private var depthPixels: IntArray? = null
     private var segmentedPixels: IntArray? = null
+    private var cachedRawDBmp: Bitmap? = null // B03: Pre-allocated depth bitmap
+    private var cachedRawSBmp: Bitmap? = null // B03: Pre-allocated segmented bitmap
     private var lastPreviewUpdateTime = 0L
     private var show3dPreviewDialog by mutableStateOf(false)
     private var accumulatedPointsArray by mutableStateOf(FloatArray(0))
@@ -296,20 +298,21 @@ class MainActivity : ComponentActivity() {
             cameraImage?.close()
 
             if (dPix != null) {
-                val rawDBmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                rawDBmp.setPixels(dPix, 0, width, 0, 0, width, height)
+                // B03: C++ tarafında döndürüldüğü için boyutlar height x width'tir
+                val bmpW = height
+                val bmpH = width
 
-                val rawSBmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                rawSBmp.setPixels(sPix!!, 0, width, 0, 0, width, height)
+                if (cachedRawDBmp == null || cachedRawDBmp!!.width != bmpW || cachedRawDBmp!!.height != bmpH) {
+                    cachedRawDBmp = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
+                    cachedRawSBmp = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
+                }
 
-                // Dikey (Portrait) ekran konumuna uyarlamak için 90 derece döndür
-                val matrix = android.graphics.Matrix().apply { postRotate(90f) }
-                val rotatedDBmp = Bitmap.createBitmap(rawDBmp, 0, 0, width, height, matrix, true)
-                val rotatedSBmp = Bitmap.createBitmap(rawSBmp, 0, 0, width, height, matrix, true)
+                cachedRawDBmp!!.setPixels(dPix, 0, bmpW, 0, 0, bmpW, bmpH)
+                cachedRawSBmp!!.setPixels(sPix!!, 0, bmpW, 0, 0, bmpW, bmpH)
 
                 runOnUiThread {
-                    depthBitmap = rotatedDBmp
-                    segmentedBitmap = rotatedSBmp
+                    depthBitmap = cachedRawDBmp
+                    segmentedBitmap = cachedRawSBmp
                 }
             }
 
@@ -335,8 +338,8 @@ class MainActivity : ComponentActivity() {
         // Ekranın kapanmasını engelle
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        // Bind camera capture thread to Efficiency Cores (Cortex-A520)
-        bindThreadAffinity(0)
+        // B01: bindThreadAffinity(0) ana iş parçacığı üzerinden kaldırıldı!
+        // GL surface thread'inde çağrılacak.
 
         val isEngineReady = initNativeEngine()
         checkCameraPermission()
@@ -408,6 +411,7 @@ class MainActivity : ComponentActivity() {
                         onExportMesh = {
                             if (isExporting) return@ScannerUI
                             isExporting = true
+                            isScanning = false // B05: Export esnasında yeni nokta birikmesini durdur
                             val outputPath = "${externalCacheDir?.absolutePath}/scan_model.obj"
                             
                             lifecycleScope.launch(Dispatchers.IO) {
@@ -448,7 +452,10 @@ class MainActivity : ComponentActivity() {
                     if (show3dPreviewDialog) {
                         PointCloudPreviewDialog(
                             points = accumulatedPointsArray,
-                            onDismiss = { show3dPreviewDialog = false }
+                            onDismiss = { 
+                                show3dPreviewDialog = false
+                                accumulatedPointsArray = FloatArray(0) // B07: Memory leak serbest bırak
+                            }
                         )
                     }
                 }

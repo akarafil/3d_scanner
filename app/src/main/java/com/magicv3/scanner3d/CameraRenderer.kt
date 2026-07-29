@@ -97,6 +97,9 @@ class CameraRenderer(
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
+        // B01: Bind GL renderer thread to Cortex-A520 Efficiency Cores (0, 1)
+        MainActivity.bindThreadAffinity(0)
+
         GLES20.glClearColor(0f, 0f, 0f, 1f)
 
         // OES Texture oluştur

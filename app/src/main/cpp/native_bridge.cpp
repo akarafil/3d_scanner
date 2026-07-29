@@ -70,61 +70,23 @@ Java_com_magicv3_scanner3d_MainActivity_getAccumulatedPointCount(JNIEnv* env, jo
 }
 
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_magicv3_scanner3d_MainActivity_addPointsToAccumulator(
-    JNIEnv* env, jobject /* this */,
-    jfloatArray xArr, jfloatArray yArr, jfloatArray zArr,
-    jfloatArray nxArr, jfloatArray nyArr, jfloatArray nzArr,
-    jbyteArray rArr, jbyteArray gArr, jbyteArray bArr, jint size) {
-    
-    jfloat* x = env->GetFloatArrayElements(xArr, nullptr);
-    jfloat* y = env->GetFloatArrayElements(yArr, nullptr);
-    jfloat* z = env->GetFloatArrayElements(zArr, nullptr);
-    jfloat* nx = env->GetFloatArrayElements(nxArr, nullptr);
-    jfloat* ny = env->GetFloatArrayElements(nyArr, nullptr);
-    jfloat* nz = env->GetFloatArrayElements(nzArr, nullptr);
-    jbyte* r = env->GetByteArrayElements(rArr, nullptr);
-    jbyte* g = env->GetByteArrayElements(gArr, nullptr);
-    jbyte* b = env->GetByteArrayElements(bArr, nullptr);
-
-    {
-        std::lock_guard<std::mutex> lock(g_cloudMutex);
-        g_accumulatedPointCloud.reserve(g_accumulatedPointCloud.size() + size);
-        for (int i = 0; i < size; ++i) {
-            g_accumulatedPointCloud.push_back({
-                x[i], y[i], z[i], 
-                nx[i], ny[i], nz[i],
-                static_cast<uint8_t>(r[i]),
-                static_cast<uint8_t>(g[i]),
-                static_cast<uint8_t>(b[i])
-            });
-        }
-    }
-
-    env->ReleaseFloatArrayElements(xArr, x, JNI_ABORT);
-    env->ReleaseFloatArrayElements(yArr, y, JNI_ABORT);
-    env->ReleaseFloatArrayElements(zArr, z, JNI_ABORT);
-    env->ReleaseFloatArrayElements(nxArr, nx, JNI_ABORT);
-    env->ReleaseFloatArrayElements(nyArr, ny, JNI_ABORT);
-    env->ReleaseFloatArrayElements(nzArr, nz, JNI_ABORT);
-    env->ReleaseByteArrayElements(rArr, r, JNI_ABORT);
-    env->ReleaseByteArrayElements(gArr, g, JNI_ABORT);
-    env->ReleaseByteArrayElements(bArr, b, JNI_ABORT);
-}
-
 extern "C" JNIEXPORT jfloatArray JNICALL
 Java_com_magicv3_scanner3d_MainActivity_getAccumulatedPoints(JNIEnv* env, jobject /* this */) {
-    const Point3D* srcPtr;
-    size_t count;
+    std::vector<Point3D> localCloudCopy;
     {
         std::lock_guard<std::mutex> lock(g_cloudMutex);
-        srcPtr = g_accumulatedPointCloud.data();
-        count  = g_accumulatedPointCloud.size();
-    } // <- Lock burada bırakılır
-    
-    jfloatArray result = env->NewFloatArray(count * 3);
-    if (count > 0) {
-        env->SetFloatArrayRegion(result, 0, count * 3, reinterpret_cast<const jfloat*>(srcPtr));
+        localCloudCopy = g_accumulatedPointCloud;
+    } // lock released
+
+    jfloatArray result = env->NewFloatArray(localCloudCopy.size() * 3);
+    if (!localCloudCopy.empty()) {
+        std::vector<float> flat(localCloudCopy.size() * 3);
+        for (size_t i = 0; i < localCloudCopy.size(); ++i) {
+            flat[i * 3 + 0] = localCloudCopy[i].x;
+            flat[i * 3 + 1] = localCloudCopy[i].y;
+            flat[i * 3 + 2] = localCloudCopy[i].z;
+        }
+        env->SetFloatArrayRegion(result, 0, flat.size(), flat.data());
     }
     return result;
 }
@@ -134,6 +96,9 @@ Java_com_magicv3_scanner3d_MainActivity_exportPointCloudMesh(JNIEnv* env, jobjec
     const char* pathStr = env->GetStringUTFChars(filePath, nullptr);
     std::string outPath(pathStr);
     env->ReleaseStringUTFChars(filePath, pathStr);
+
+    // B01: Ağır mesh oluşturma işlemini Cortex-X4 Prime çekirdeğine bağla
+    BindThreadToCores(ThreadRole::POISSON_RECON);
 
     std::vector<Point3D> localCloudCopy;
     {
@@ -205,8 +170,8 @@ Java_com_magicv3_scanner3d_MainActivity_processFrameNative(
 
     // 2. Convert YUV to RGB for Depth Map Resolution (SIMD NEON Optimized)
     if (yRaw && uRaw && vRaw && imgW > 0 && imgH > 0) {
-        // Önceden hesaplanmış çarpanlar
-        const int16x8_t c1370 = vdupq_n_s16(1371);
+        // Önceden hesaplanmış çarpanlar (B11: 1.370705f * 1024 = 1403.6 -> 1404)
+        const int16x8_t c1370 = vdupq_n_s16(1404);
         const int16x8_t c337 = vdupq_n_s16(338);
         const int16x8_t c698 = vdupq_n_s16(698);
         const int16x8_t c1732 = vdupq_n_s16(1732);
@@ -286,42 +251,56 @@ Java_com_magicv3_scanner3d_MainActivity_processFrameNative(
     int centerY = height / 2;
     float centerDist = fusedOutput[centerY * width + centerX];
 
-    // 3a. Generate Depth Heatmap Pixels for Panel 2
+    // 3a. Generate Depth Heatmap Pixels for Panel 2 (B03: Rotated 90 degrees clockwise in C++)
     if (outDepthPixels) {
         jint* depthPix = env->GetIntArrayElements(outDepthPixels, nullptr);
-        for (int i = 0; i < N; ++i) {
-            float d = fusedOutput[i];
-            if (d <= 0.1f) {
-                depthPix[i] = 0xFF000000;
-            } else {
-                float norm = std::clamp((d - 0.1f) / 2.5f, 0.0f, 1.0f);
-                uint8_t r = static_cast<uint8_t>(255.0f * norm);
-                uint8_t g = static_cast<uint8_t>(255.0f * (1.0f - std::abs(norm - 0.5f) * 2.0f));
-                uint8_t b = static_cast<uint8_t>(255.0f * (1.0f - norm));
-                depthPix[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                float d = fusedOutput[y * width + x];
+                int targetX = height - 1 - y;
+                int targetY = x;
+                int targetIdx = targetY * height + targetX;
+
+                uint32_t color = 0xFF000000;
+                if (d > 0.1f) {
+                    float norm = std::clamp((d - 0.1f) / 2.5f, 0.0f, 1.0f);
+                    uint8_t r = static_cast<uint8_t>(255.0f * norm);
+                    uint8_t g = static_cast<uint8_t>(255.0f * (1.0f - std::abs(norm - 0.5f) * 2.0f));
+                    uint8_t b = static_cast<uint8_t>(255.0f * (1.0f - norm));
+                    color = 0xFF000000 | (r << 16) | (g << 8) | b;
+                }
+                depthPix[targetIdx] = color;
             }
         }
         env->ReleaseIntArrayElements(outDepthPixels, depthPix, 0);
     }
 
-    // 3b. Generate Segmented/Isolated Object Pixels for Panel 3 (Background Removed)
+    // 3b. Generate Segmented/Isolated Object Pixels for Panel 3 (B03: Rotated 90 degrees clockwise in C++)
     if (outSegmentedPixels) {
         jint* segPix = env->GetIntArrayElements(outSegmentedPixels, nullptr);
-        for (int i = 0; i < N; ++i) {
-            float d = fusedOutput[i];
-            bool isTarget = true;
-            if (g_useObjectROI && g_targetDepth > 0.1f) {
-                if (std::abs(d - g_targetDepth) > g_depthTolerance) {
-                    isTarget = false;
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                float d = fusedOutput[y * width + x];
+                int targetX = height - 1 - y;
+                int targetY = x;
+                int targetIdx = targetY * height + targetX;
+
+                bool isTarget = true;
+                if (g_useObjectROI && g_targetDepth > 0.1f) {
+                    if (std::abs(d - g_targetDepth) > g_depthTolerance) {
+                        isTarget = false;
+                    }
                 }
-            }
-            if (d > 0.1f && isTarget) {
-                uint8_t r = rgbImg[i * 3 + 0];
-                uint8_t g = rgbImg[i * 3 + 1];
-                uint8_t b = rgbImg[i * 3 + 2];
-                segPix[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
-            } else {
-                segPix[i] = 0xFF000000; // Arka plan silindi!
+                uint32_t color = 0xFF000000;
+                if (d > 0.1f && isTarget) {
+                    uint8_t r = rgbImg[(y * width + x) * 3 + 0];
+                    uint8_t g = rgbImg[(y * width + x) * 3 + 1];
+                    uint8_t b = rgbImg[(y * width + x) * 3 + 2];
+                    color = 0xFF000000 | (r << 16) | (g << 8) | b;
+                } else {
+                    color = 0xFF000000; // Arka plan silindi!
+                }
+                segPix[targetIdx] = color;
             }
         }
         env->ReleaseIntArrayElements(outSegmentedPixels, segPix, 0);
@@ -418,6 +397,10 @@ Java_com_magicv3_scanner3d_MainActivity_processFrameNative(
 
         if (!newPoints.empty()) {
             std::lock_guard<std::mutex> lock(g_cloudMutex);
+            // B10: O(N) kopyalama maliyetini azaltmak için önden kapasite genişlet
+            if (g_accumulatedPointCloud.capacity() < g_accumulatedPointCloud.size() + newPoints.size() + 1024) {
+                g_accumulatedPointCloud.reserve((g_accumulatedPointCloud.size() + newPoints.size()) * 2);
+            }
             g_accumulatedPointCloud.insert(g_accumulatedPointCloud.end(), newPoints.begin(), newPoints.end());
         }
     }
@@ -440,10 +423,21 @@ Java_com_magicv3_scanner3d_MainActivity_clearTemporalBuffer(JNIEnv* env, jobject
 // -----------------------------------------------
 extern "C" JNIEXPORT jint JNICALL
 Java_com_magicv3_scanner3d_MainActivity_denoisePointCloudNative(JNIEnv* env, jobject /* this */) {
-    std::lock_guard<std::mutex> lock(g_cloudMutex);
-    int before = static_cast<int>(g_accumulatedPointCloud.size());
-    g_denoiseEngine.DenoisePointCloud(g_accumulatedPointCloud);
-    int after = static_cast<int>(g_accumulatedPointCloud.size());
+    std::vector<Point3D> localCloud;
+    {
+        std::lock_guard<std::mutex> lock(g_cloudMutex);
+        localCloud = g_accumulatedPointCloud;
+    } // lock released - Denoise çalışırken frame processing kilitlenmez (B05)
+
+    int before = static_cast<int>(localCloud.size());
+    g_denoiseEngine.DenoisePointCloud(localCloud);
+    int after = static_cast<int>(localCloud.size());
+
+    {
+        std::lock_guard<std::mutex> lock(g_cloudMutex);
+        g_accumulatedPointCloud = std::move(localCloud);
+    }
+
     LOGI("[NPU-SOR] %d → %d nokta (%d parazit temizlendi).", before, after, before - after);
-    return static_cast<jint>(before - after); // Temizlenen nokta sayısını döndür
+    return static_cast<jint>(before - after);
 }
