@@ -63,6 +63,13 @@ dependencies {
     // Material Design XML (Required for Material3 parent XML themes)
     implementation("com.google.android.material:material:1.12.0")
 
+    // ── CameraX (Phase 1.1: dependency hazır, kullanımı 1.2+) ──────────
+    val cameraxVersion = "1.3.4"
+    implementation("androidx.camera:camera-core:$cameraxVersion")
+    implementation("androidx.camera:camera-camera2:$cameraxVersion")
+    implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
+    implementation("androidx.camera:camera-view:$cameraxVersion")
+
     // Testing
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
