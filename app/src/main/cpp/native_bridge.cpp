@@ -179,6 +179,169 @@ Java_com_magicv3_scanner3d_MainActivity_fuseDepthMapsNative(
     env->ReleaseFloatArrayElements(outputArr,       output,      0);
 }
 
+// ============================================================
+//  ZERO-COPY NATIVE FRAME PROCESSOR
+//  Her karede Kotlin->Native kopyalama yapmadan doğrudan
+//  DirectByteBuffer üzerinden NPU denoise + Backprojection yapar.
+// ============================================================
+extern "C" JNIEXPORT jfloat JNICALL
+Java_com_magicv3_scanner3d_MainActivity_processFrameNative(
+    JNIEnv* env, jobject /* this */,
+    jobject depthDirectBuf, jint depthRowStride, jint depthPixelStride,
+    jobject confDirectBuf, jint confRowStride, jint confPixelStride,
+    jobject yDirectBuf, jobject uDirectBuf, jobject vDirectBuf,
+    jint yRowStride, jint uvRowStride, jint uvPixelStride,
+    jfloatArray cameraToWorldArr,
+    jfloat fx, jfloat fy, jfloat cx, jfloat cy,
+    jint width, jint height,
+    jint imgW, jint imgH,
+    jboolean isScanning) {
+
+    if (!depthDirectBuf) return 0.0f;
+
+    const uint8_t* depthRaw = static_cast<const uint8_t*>(env->GetDirectBufferAddress(depthDirectBuf));
+    const uint8_t* confRaw = confDirectBuf ? static_cast<const uint8_t*>(env->GetDirectBufferAddress(confDirectBuf)) : nullptr;
+    const uint8_t* yRaw = yDirectBuf ? static_cast<const uint8_t*>(env->GetDirectBufferAddress(yDirectBuf)) : nullptr;
+    const uint8_t* uRaw = uDirectBuf ? static_cast<const uint8_t*>(env->GetDirectBufferAddress(uDirectBuf)) : nullptr;
+    const uint8_t* vRaw = vDirectBuf ? static_cast<const uint8_t*>(env->GetDirectBufferAddress(vDirectBuf)) : nullptr;
+
+    int N = width * height;
+    std::vector<float> arcoreDepth(N);
+    std::vector<float> arcoreConf(N, 1.0f);
+    std::vector<uint8_t> rgbImg(N * 3, 128);
+
+    // 1. Convert Depth & Confidence
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            int idx = y * width + x;
+            int depthByteIdx = y * depthRowStride + x * depthPixelStride;
+            uint16_t mm = *reinterpret_cast<const uint16_t*>(depthRaw + depthByteIdx);
+            arcoreDepth[idx] = static_cast<float>(mm) / 1000.0f;
+
+            if (confRaw) {
+                int confByteIdx = y * confRowStride + x * confPixelStride;
+                arcoreConf[idx] = static_cast<float>(confRaw[confByteIdx]) / 255.0f;
+            }
+        }
+    }
+
+    // 2. Convert YUV to RGB for Depth Map Resolution
+    if (yRaw && uRaw && vRaw && imgW > 0 && imgH > 0) {
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                int camX = std::clamp(static_cast<int>(static_cast<float>(x) / width * imgW), 0, imgW - 1);
+                int camY = std::clamp(static_cast<int>(static_cast<float>(y) / height * imgH), 0, imgH - 1);
+
+                int yIdx = camY * yRowStride + camX;
+                int uvIdx = (camY / 2) * uvRowStride + (camX / 2) * uvPixelStride;
+
+                float yVal = static_cast<float>(yRaw[yIdx]);
+                float uVal = static_cast<float>(uRaw[uvIdx]) - 128.0f;
+                float vVal = static_cast<float>(vRaw[uvIdx]) - 128.0f;
+
+                int r = std::clamp(static_cast<int>(yVal + 1.370705f * vVal), 0, 255);
+                int g = std::clamp(static_cast<int>(yVal - 0.337633f * uVal - 0.698001f * vVal), 0, 255);
+                int b = std::clamp(static_cast<int>(yVal + 1.732446f * uVal), 0, 255);
+
+                int idx = (y * width + x) * 3;
+                rgbImg[idx + 0] = static_cast<uint8_t>(r);
+                rgbImg[idx + 1] = static_cast<uint8_t>(g);
+                rgbImg[idx + 2] = static_cast<uint8_t>(b);
+            }
+        }
+    }
+
+    // 3. Process Depth Frame (NPU / Vulkan / OpenMP Denoise Pipeline)
+    std::vector<float> fusedOutput(N);
+    g_denoiseEngine.ProcessDepthFrame(
+        arcoreDepth.data(),
+        rgbImg.data(),
+        fusedOutput.data(),
+        width, height
+    );
+
+    // Calculate center distance
+    int centerX = width / 2;
+    int centerY = height / 2;
+    float centerDist = fusedOutput[centerY * width + centerX];
+
+    // 4. If Scanning: Backproject + Compute Normals + Accumulate in C++
+    if (isScanning && cameraToWorldArr) {
+        jfloat* c2w = env->GetFloatArrayElements(cameraToWorldArr, nullptr);
+
+        int step = 8;
+        std::vector<Point3D> newPoints;
+        newPoints.reserve((height / step) * (width / step));
+
+        for (int py = 0; py < height; py += step) {
+            for (int px = 0; px < width; px += step) {
+                int idx = py * width + px;
+                float depth = fusedOutput[idx];
+
+                if (depth > 0.1f && depth < 5.0f) {
+                    float xCam = (px - cx) * depth / fx;
+                    float yCam = (py - cy) * depth / fy;
+                    float zCam = depth;
+
+                    float xWorld = c2w[0] * xCam + c2w[4] * yCam + c2w[8] * zCam + c2w[12];
+                    float yWorld = c2w[1] * xCam + c2w[5] * yCam + c2w[9] * zCam + c2w[13];
+                    float zWorld = c2w[2] * xCam + c2w[6] * yCam + c2w[10] * zCam + c2w[14];
+
+                    // Gradient-based Normal calculation
+                    float rightDepth = (px + step < width) ? fusedOutput[py * width + px + step] : depth;
+                    float downDepth = (py + step < height) ? fusedOutput[(py + step) * width + px] : depth;
+
+                    float p1x = (px + step - cx) * rightDepth / fx;
+                    float p1y = yCam;
+                    float p1z = rightDepth;
+
+                    float p2x = xCam;
+                    float p2y = (py + step - cy) * downDepth / fy;
+                    float p2z = downDepth;
+
+                    float v1x = p1x - xCam, v1y = p1y - yCam, v1z = p1z - zCam;
+                    float v2x = p2x - xCam, v2y = p2y - yCam, v2z = p2z - zCam;
+
+                    float nxCam = v1y * v2z - v1z * v2y;
+                    float nyCam = v1z * v2x - v1x * v2z;
+                    float nzCam = v1x * v2y - v1y * v2x;
+
+                    float len = std::sqrt(nxCam * nxCam + nyCam * nyCam + nzCam * nzCam);
+                    if (len > 0.0001f) {
+                        nxCam /= len; nyCam /= len; nzCam /= len;
+                    } else {
+                        nxCam = 0.0f; nyCam = 0.0f; nzCam = -1.0f;
+                    }
+
+                    float nxWorld = c2w[0] * nxCam + c2w[4] * nyCam + c2w[8] * nzCam;
+                    float nyWorld = c2w[1] * nxCam + c2w[5] * nyCam + c2w[9] * nzCam;
+                    float nzWorld = c2w[2] * nxCam + c2w[6] * nyCam + c2w[10] * nzCam;
+
+                    int rgbIdx = (py * width + px) * 3;
+                    uint8_t r = rgbImg[rgbIdx + 0];
+                    uint8_t g = rgbImg[rgbIdx + 1];
+                    uint8_t b = rgbImg[rgbIdx + 2];
+
+                    newPoints.push_back({
+                        xWorld, yWorld, zWorld,
+                        nxWorld, nyWorld, nzWorld,
+                        r, g, b
+                    });
+                }
+            }
+        }
+
+        env->ReleaseFloatArrayElements(cameraToWorldArr, c2w, JNI_ABORT);
+
+        if (!newPoints.empty()) {
+            std::lock_guard<std::mutex> lock(g_cloudMutex);
+            g_accumulatedPointCloud.insert(g_accumulatedPointCloud.end(), newPoints.begin(), newPoints.end());
+        }
+    }
+
+    return centerDist;
+}
+
 // -----------------------------------------------
 //  Temporal buffer sıfırlama (yeni tarama başladığında)
 // -----------------------------------------------

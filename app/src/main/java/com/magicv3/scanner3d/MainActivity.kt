@@ -65,7 +65,17 @@ class MainActivity : ComponentActivity() {
     private external fun clearAccumulatedPoints()
     private external fun getAccumulatedPointCount(): Int
     private external fun getAccumulatedPoints(): FloatArray
-    private external fun addPointsToAccumulator(x: FloatArray, y: FloatArray, z: FloatArray, nx: FloatArray, ny: FloatArray, nz: FloatArray, r: ByteArray, g: ByteArray, b: ByteArray, size: Int)
+    private external fun processFrameNative(
+        depthDirectBuf: java.nio.ByteBuffer, depthRowStride: Int, depthPixelStride: Int,
+        confDirectBuf: java.nio.ByteBuffer?, confRowStride: Int, confPixelStride: Int,
+        yDirectBuf: java.nio.ByteBuffer?, uDirectBuf: java.nio.ByteBuffer?, vDirectBuf: java.nio.ByteBuffer?,
+        yRowStride: Int, uvRowStride: Int, uvPixelStride: Int,
+        cameraToWorld: FloatArray?,
+        fx: Float, fy: Float, cx: Float, cy: Float,
+        width: Int, height: Int,
+        imgW: Int, imgH: Int,
+        isScanning: Boolean
+    ): Float
     private external fun initNativeEngine(): Boolean
     private external fun bindThreadAffinity(roleIndex: Int)
 
@@ -205,237 +215,76 @@ class MainActivity : ComponentActivity() {
             val height = depthImage.height
 
             val depthPlanes = depthImage.planes[0]
-            val depthBuffer = depthPlanes.getBuffer()
-            depthBuffer.order(java.nio.ByteOrder.LITTLE_ENDIAN)
-            val depthRowStride = depthPlanes.getRowStride()
-            val depthPixelStride = depthPlanes.getPixelStride()
+            val depthBuffer = depthPlanes.buffer
+            val depthRowStride = depthPlanes.rowStride
+            val depthPixelStride = depthPlanes.pixelStride
 
-            val arcoreDepth = FloatArray(width * height)
-            val arcoreConf = FloatArray(width * height)
-
-            if (confidenceImage != null) {
-                val confPlanes = confidenceImage.planes[0]
-                val confBuffer = confPlanes.getBuffer()
-                val confRowStride = confPlanes.getRowStride()
-                val confPixelStride = confPlanes.getPixelStride()
-
-                for (y in 0 until height) {
-                    for (x in 0 until width) {
-                        val idx = y * width + x
-
-                        val depthIndex = y * depthRowStride + x * depthPixelStride
-                        val mm = depthBuffer.getShort(depthIndex).toInt() and 0xFFFF
-                        arcoreDepth[idx] = mm.toFloat() / 1000.0f
-
-                        val confIndex = y * confRowStride + x * confPixelStride
-                        val c = confBuffer.get(confIndex).toInt() and 0xFF
-                        arcoreConf[idx] = c.toFloat() / 255.0f
-                    }
-                }
-                confidenceImage.close()
-            } else {
-                for (y in 0 until height) {
-                    for (x in 0 until width) {
-                        val idx = y * width + x
-
-                        val depthIndex = y * depthRowStride + x * depthPixelStride
-                        val mm = depthBuffer.getShort(depthIndex).toInt() and 0xFFFF
-                        arcoreDepth[idx] = mm.toFloat() / 1000.0f
-
-                        arcoreConf[idx] = 1.0f
-                    }
-                }
-            }
-
-            depthImage.close()
+            val confBuffer = confidenceImage?.planes?.get(0)?.buffer
+            val confRowStride = confidenceImage?.planes?.get(0)?.rowStride ?: 0
+            val confPixelStride = confidenceImage?.planes?.get(0)?.pixelStride ?: 0
 
             val cameraImage = try { frame.acquireCameraImage() } catch(e: Exception) { null }
-            val dummyStereoDepth = FloatArray(width * height)
-            val realRgb = ByteArray(width * height * 3)
+
+            var yBuf: java.nio.ByteBuffer? = null
+            var uBuf: java.nio.ByteBuffer? = null
+            var vBuf: java.nio.ByteBuffer? = null
+            var yRowStride = 0
+            var uvRowStride = 0
+            var uvPixelStride = 0
+            var imgW = 0
+            var imgH = 0
 
             if (cameraImage != null) {
-                val imgW = cameraImage.width
-                val imgH = cameraImage.height
-                val yBuf = cameraImage.planes[0].buffer
-                val uBuf = cameraImage.planes[1].buffer
-                val vBuf = cameraImage.planes[2].buffer
-                val yRowStride = cameraImage.planes[0].rowStride
-                val uvRowStride = cameraImage.planes[1].rowStride
-                val uvPixelStride = cameraImage.planes[1].pixelStride
-
-                for (y in 0 until height) {
-                    for (x in 0 until width) {
-                        val camX = (x.toFloat() / width.toFloat() * imgW).toInt().coerceIn(0, imgW - 1)
-                        val camY = (y.toFloat() / height.toFloat() * imgH).toInt().coerceIn(0, imgH - 1)
-
-                        val yIdx = camY * yRowStride + camX
-                        val uvIdx = (camY / 2) * uvRowStride + (camX / 2) * uvPixelStride
-
-                        val yVal = (yBuf.get(yIdx).toInt() and 0xFF).toFloat()
-                        val uVal = (uBuf.get(uvIdx).toInt() and 0xFF).toFloat() - 128f
-                        val vVal = (vBuf.get(uvIdx).toInt() and 0xFF).toFloat() - 128f
-
-                        val r = (yVal + 1.370705f * vVal).toInt().coerceIn(0, 255)
-                        val g = (yVal - 0.337633f * uVal - 0.698001f * vVal).toInt().coerceIn(0, 255)
-                        val b = (yVal + 1.732446f * uVal).toInt().coerceIn(0, 255)
-
-                        val idx = (y * width + x) * 3
-                        realRgb[idx + 0] = r.toByte()
-                        realRgb[idx + 1] = g.toByte()
-                        realRgb[idx + 2] = b.toByte()
-                    }
-                }
-            } else {
-                for (i in realRgb.indices) realRgb[i] = 128.toByte()
+                imgW = cameraImage.width
+                imgH = cameraImage.height
+                yBuf = cameraImage.planes[0].buffer
+                uBuf = cameraImage.planes[1].buffer
+                vBuf = cameraImage.planes[2].buffer
+                yRowStride = cameraImage.planes[0].rowStride
+                uvRowStride = cameraImage.planes[1].rowStride
+                uvPixelStride = cameraImage.planes[1].pixelStride
             }
 
-            val fusedOutput = FloatArray(width * height)
-
-            fuseDepthMapsNative(arcoreDepth, arcoreConf, dummyStereoDepth, realRgb, fusedOutput, width, height)
+            var cameraToWorldMatrix: FloatArray? = null
+            var fx = 0f; var fy = 0f; var cx = 0f; var cy = 0f
 
             if (isScanning) {
                 val intrinsics = frame.camera.imageIntrinsics
-                val focalLength = intrinsics.focalLength
-                val principalPoint = intrinsics.principalPoint
-                val fx = focalLength[0]
-                val fy = focalLength[1]
-                val cx = principalPoint[0]
-                val cy = principalPoint[1]
+                fx = intrinsics.focalLength[0]
+                fy = intrinsics.focalLength[1]
+                cx = intrinsics.principalPoint[0]
+                cy = intrinsics.principalPoint[1]
 
-                val cameraPose = frame.camera.pose
-                val cameraToWorldMatrix = FloatArray(16)
-                cameraPose.toMatrix(cameraToWorldMatrix, 0)
-
-                val step = 8 // Performans için her 8 pikselde bir örnekle
-                val xList = ArrayList<Float>()
-                val yList = ArrayList<Float>()
-                val zList = ArrayList<Float>()
-                val nxList = ArrayList<Float>()
-                val nyList = ArrayList<Float>()
-                val nzList = ArrayList<Float>()
-                val rList = ArrayList<Byte>()
-                val gList = ArrayList<Byte>()
-                val bList = ArrayList<Byte>()
-
-                var yBuf: java.nio.ByteBuffer? = null
-                var uBuf: java.nio.ByteBuffer? = null
-                var vBuf: java.nio.ByteBuffer? = null
-                var yRowStride = 0
-                var uvRowStride = 0
-                var uvPixelStride = 0
-                var imgW = 0
-                var imgH = 0
-
-                if (cameraImage != null) {
-                    imgW = cameraImage.width
-                    imgH = cameraImage.height
-                    yBuf = cameraImage.planes[0].buffer
-                    uBuf = cameraImage.planes[1].buffer
-                    vBuf = cameraImage.planes[2].buffer
-                    yRowStride = cameraImage.planes[0].rowStride
-                    uvRowStride = cameraImage.planes[1].rowStride
-                    uvPixelStride = cameraImage.planes[1].pixelStride
-                }
-
-                for (py in 0 until height step step) {
-                    for (px in 0 until width step step) {
-                        val idx = py * width + px
-                        val depth = fusedOutput[idx]
-
-                        if (depth > 0.1f && depth < 5.0f) {
-                            val xCam = (px - cx) * depth / fx
-                            val yCam = (py - cy) * depth / fy
-                            val zCam = depth
-
-                            val xWorld = cameraToWorldMatrix[0] * xCam + cameraToWorldMatrix[4] * yCam + cameraToWorldMatrix[8] * zCam + cameraToWorldMatrix[12]
-                            val yWorld = cameraToWorldMatrix[1] * xCam + cameraToWorldMatrix[5] * yCam + cameraToWorldMatrix[9] * zCam + cameraToWorldMatrix[13]
-                            val zWorld = cameraToWorldMatrix[2] * xCam + cameraToWorldMatrix[6] * yCam + cameraToWorldMatrix[10] * zCam + cameraToWorldMatrix[14]
-
-                            // Normal hesaplama (Gradient tabanlı)
-                            val rightDepth = if (px + step < width) fusedOutput[py * width + px + step] else depth
-                            val downDepth = if (py + step < height) fusedOutput[(py + step) * width + px] else depth
-
-                            val p1x = (px + step - cx) * rightDepth / fx
-                            val p1y = yCam
-                            val p1z = rightDepth
-
-                            val p2x = xCam
-                            val p2y = (py + step - cy) * downDepth / fy
-                            val p2z = downDepth
-
-                            val v1x = p1x - xCam
-                            val v1y = p1y - yCam
-                            val v1z = p1z - zCam
-
-                            val v2x = p2x - xCam
-                            val v2y = p2y - yCam
-                            val v2z = p2z - zCam
-
-                            var nxCam = v1y * v2z - v1z * v2y
-                            var nyCam = v1z * v2x - v1x * v2z
-                            var nzCam = v1x * v2y - v1y * v2x
-
-                            val len = kotlin.math.sqrt(nxCam * nxCam + nyCam * nyCam + nzCam * nzCam)
-                            if (len > 0.0001f) {
-                                nxCam /= len; nyCam /= len; nzCam /= len
-                            } else {
-                                nxCam = 0f; nyCam = 0f; nzCam = -1f
-                            }
-
-                            val nxWorld = cameraToWorldMatrix[0] * nxCam + cameraToWorldMatrix[4] * nyCam + cameraToWorldMatrix[8] * nzCam
-                            val nyWorld = cameraToWorldMatrix[1] * nxCam + cameraToWorldMatrix[5] * nyCam + cameraToWorldMatrix[9] * nzCam
-                            val nzWorld = cameraToWorldMatrix[2] * nxCam + cameraToWorldMatrix[6] * nyCam + cameraToWorldMatrix[10] * nzCam
-
-                            var r = 200
-                            var g = 200
-                            var b = 200
-
-                            if (cameraImage != null) {
-                                // Map depth coords to camera coords
-                                val camX = (px.toFloat() / width.toFloat() * imgW).toInt().coerceIn(0, imgW - 1)
-                                val camY = (py.toFloat() / height.toFloat() * imgH).toInt().coerceIn(0, imgH - 1)
-
-                                val yIdx = camY * yRowStride + camX
-                                val uvIdx = (camY / 2) * uvRowStride + (camX / 2) * uvPixelStride
-
-                                val yVal = (yBuf!!.get(yIdx).toInt() and 0xFF).toFloat()
-                                val uVal = (uBuf!!.get(uvIdx).toInt() and 0xFF).toFloat() - 128f
-                                val vVal = (vBuf!!.get(uvIdx).toInt() and 0xFF).toFloat() - 128f
-
-                                r = (yVal + 1.370705f * vVal).toInt().coerceIn(0, 255)
-                                g = (yVal - 0.337633f * uVal - 0.698001f * vVal).toInt().coerceIn(0, 255)
-                                b = (yVal + 1.732446f * uVal).toInt().coerceIn(0, 255)
-                            }
-
-                            xList.add(xWorld)
-                            yList.add(yWorld)
-                            zList.add(zWorld)
-                            nxList.add(nxWorld)
-                            nyList.add(nyWorld)
-                            nzList.add(nzWorld)
-                            rList.add(r.toByte())
-                            gList.add(g.toByte())
-                            bList.add(b.toByte())
-                        }
-                    }
-                }
-
-                if (xList.isNotEmpty()) {
-                    val size = xList.size
-                    addPointsToAccumulator(xList.toFloatArray(), yList.toFloatArray(), zList.toFloatArray(), nxList.toFloatArray(), nyList.toFloatArray(), nzList.toFloatArray(), rList.toByteArray(), gList.toByteArray(), bList.toByteArray(), size)
-                    
-                    val currentTime = System.currentTimeMillis()
-                    if (currentTime - lastUiUpdateTime > 500) {
-                        lastUiUpdateTime = currentTime
-                        val currentTotal = getAccumulatedPointCount()
-                        runOnUiThread {
-                            pointCount = currentTotal
-                        }
-                    }
-                }
+                cameraToWorldMatrix = FloatArray(16)
+                frame.camera.pose.toMatrix(cameraToWorldMatrix, 0)
             }
 
+            // Zero-Copy Native İşleme
+            val avgDist = processFrameNative(
+                depthBuffer, depthRowStride, depthPixelStride,
+                confBuffer, confRowStride, confPixelStride,
+                yBuf, uBuf, vBuf,
+                yRowStride, uvRowStride, uvPixelStride,
+                cameraToWorldMatrix,
+                fx, fy, cx, cy,
+                width, height,
+                imgW, imgH,
+                isScanning
+            )
+
+            depthImage.close()
+            confidenceImage?.close()
             cameraImage?.close()
+
+            val currentTime = System.currentTimeMillis()
+            if (currentTime - lastUiUpdateTime > 500) {
+                lastUiUpdateTime = currentTime
+                val currentTotal = getAccumulatedPointCount()
+                runOnUiThread {
+                    pointCount = currentTotal
+                    centerDistance = avgDist
+                }
+            }
 
             val currentMs = System.currentTimeMillis()
             if (currentMs - lastPreviewUpdateTime > 100) {
