@@ -86,11 +86,6 @@ class MainActivity : ComponentActivity() {
     private external fun bindThreadAffinity(roleIndex: Int)
 
     private external fun exportPointCloudMesh(filePath: String): Boolean
-    private external fun fuseDepthMapsNative(
-        arcoreDepth: FloatArray, arcoreConf: FloatArray,
-        stereoDepth: FloatArray, rgbImg: ByteArray,
-        output: FloatArray, width: Int, height: Int
-    )
     // NPU Parazit Temizleme — Temporal buffer sıfırlama
     private external fun clearTemporalBuffer()
     // NPU SOR — Nokta bulutu istatistiksel parazit temizleyici
@@ -335,6 +330,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // Ekranın kapanmasını engelle
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         // Bind camera capture thread to Efficiency Cores (Cortex-A520)
         bindThreadAffinity(0)
@@ -415,16 +413,6 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                             }
-                        },
-                        onTestFusion = {
-                            val w = 64; val h = 64; val size = w * h
-                            val dummyArDepth = FloatArray(size) { 1.5f }
-                            val dummyArConf = FloatArray(size) { 0.8f }
-                            val dummyStereoDepth = FloatArray(size) { 1.48f }
-                            val dummyRgb = ByteArray(size * 3) { 128.toByte() }
-                            val output = FloatArray(size)
-                            fuseDepthMapsNative(dummyArDepth, dummyArConf, dummyStereoDepth, dummyRgb, output, w, h)
-                            Toast.makeText(this@MainActivity, "Füzyon Tamamlandı", Toast.LENGTH_SHORT).show()
                         },
                         onShowPreview3D = {
                             val pts = getAccumulatedPoints()
@@ -567,7 +555,6 @@ fun ScannerUI(
     onStopScan: () -> Unit,
     onClearScan: () -> Unit,
     onExportMesh: () -> Unit,
-    onTestFusion: () -> Unit,
     onShowPreview3D: () -> Unit,
     onSetTargetROI: (Float, Float) -> Unit
 ) {

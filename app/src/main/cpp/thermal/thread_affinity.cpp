@@ -3,9 +3,36 @@
 #include <sched.h>
 #include <unistd.h>
 #include <android/log.h>
+#include <cstdio>
+#include <algorithm>
 
 #define LOG_TAG "ThreadAffinity"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+
+static int GetPrimeCoreIndex() {
+    int numCores = sysconf(_SC_NPROCESSORS_CONF);
+    if (numCores <= 0) return 7; // Fallback
+
+    int primeCore = 7;
+    int maxFreq = 0;
+
+    for (int i = 0; i < numCores; ++i) {
+        char path[128];
+        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", i);
+        FILE* fp = fopen(path, "r");
+        if (fp) {
+            int freq = 0;
+            if (fscanf(fp, "%d", &freq) == 1) {
+                if (freq > maxFreq) {
+                    maxFreq = freq;
+                    primeCore = i;
+                }
+            }
+            fclose(fp);
+        }
+    }
+    return primeCore;
+}
 
 void BindThreadToCores(ThreadRole role) {
     cpu_set_t cpuset;
@@ -25,11 +52,13 @@ void BindThreadToCores(ThreadRole role) {
             CPU_SET(4, &cpuset);
             LOGI("Thread pinned to Cortex-A720 Performance Cores (2, 3, 4)");
             break;
-        case ThreadRole::POISSON_RECON:
-            // Çekirdek 7 (Cortex-X4 Prime Core) - Yalnızca arka plan tarama sonrası işlerinde
-            CPU_SET(7, &cpuset);
-            LOGI("Thread pinned to Cortex-X4 Prime Core (7)");
+        case ThreadRole::POISSON_RECON: {
+            // Dinamik olarak Prime Core'u (Cortex-X4) tespit et
+            int primeCore = GetPrimeCoreIndex();
+            CPU_SET(primeCore, &cpuset);
+            LOGI("Thread pinned to dynamically detected Prime Core (%d)", primeCore);
             break;
+        }
     }
 
     sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);

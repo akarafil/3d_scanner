@@ -165,18 +165,43 @@ void NpuBilateralFilter::Apply(
 // ============================================================
 
 float NpuSORFilter::knnMeanDistance(
-    const std::vector<Point3D>& pts, int idx, std::vector<float>& distsBuffer) const
+    const std::vector<Point3D>& pts, 
+    int idx, 
+    const std::vector<std::vector<int>>& spatialGrid, 
+    int hashDim, 
+    float minX, float minY, float minZ, 
+    float hStepX, float hStepY, float hStepZ, 
+    std::vector<float>& distsBuffer) const
 {
     const auto& p = pts[idx];
-    int n = static_cast<int>(pts.size());
     
+    int gx = std::clamp(static_cast<int>((p.x - minX) / hStepX), 0, hashDim - 1);
+    int gy = std::clamp(static_cast<int>((p.y - minY) / hStepY), 0, hashDim - 1);
+    int gz = std::clamp(static_cast<int>((p.z - minZ) / hStepZ), 0, hashDim - 1);
+
     distsBuffer.clear();
-    for (int j = 0; j < n; ++j) {
-        if (j == idx) continue;
-        float dx = pts[j].x - p.x;
-        float dy = pts[j].y - p.y;
-        float dz = pts[j].z - p.z;
-        distsBuffer.push_back(dx*dx + dy*dy + dz*dz);
+
+    // 3x3x3 komşu hücreleri tara
+    for (int dx = -1; dx <= 1; ++dx) {
+        int nx = gx + dx;
+        if (nx < 0 || nx >= hashDim) continue;
+        for (int dy = -1; dy <= 1; ++dy) {
+            int ny = gy + dy;
+            if (ny < 0 || ny >= hashDim) continue;
+            for (int dz = -1; dz <= 1; ++dz) {
+                int nz = gz + dz;
+                if (nz < 0 || nz >= hashDim) continue;
+
+                int cellIdx = (nx * hashDim + ny) * hashDim + nz;
+                for (int j : spatialGrid[cellIdx]) {
+                    if (j == idx) continue;
+                    float dX = pts[j].x - p.x;
+                    float dY = pts[j].y - p.y;
+                    float dZ = pts[j].z - p.z;
+                    distsBuffer.push_back(dX*dX + dY*dY + dZ*dZ);
+                }
+            }
+        }
     }
 
     int actualK = std::min(m_k, static_cast<int>(distsBuffer.size()));
@@ -193,7 +218,38 @@ void NpuSORFilter::Filter(std::vector<Point3D>& points) const {
     const int n = static_cast<int>(points.size());
     if (n < m_k + 1) return; // Yeterli nokta yok
 
-    LOGI("[SOR] %d nokta üzerinde k=%d komşu analizi başlatıldı.", n, m_k);
+    LOGI("[SOR] %d nokta üzerinde k=%d komşu analizi (Spatial Hash) başlatıldı.", n, m_k);
+
+    // 1. Bounding Box
+    float minX = 1e9f, minY = 1e9f, minZ = 1e9f;
+    float maxX = -1e9f, maxY = -1e9f, maxZ = -1e9f;
+    for (const auto& pt : points) {
+        minX = std::min(minX, pt.x);
+        minY = std::min(minY, pt.y);
+        minZ = std::min(minZ, pt.z);
+        maxX = std::max(maxX, pt.x);
+        maxY = std::max(maxY, pt.y);
+        maxZ = std::max(maxZ, pt.z);
+    }
+    float padding = 0.05f;
+    minX -= padding; minY -= padding; minZ -= padding;
+    maxX += padding; maxY += padding; maxZ += padding;
+
+    // 2. Spatial Hash Grid oluştur
+    const int hashDim = 32; // SOR için 32 yeterli
+    float hStepX = (maxX - minX) / hashDim;
+    float hStepY = (maxY - minY) / hashDim;
+    float hStepZ = (maxZ - minZ) / hashDim;
+
+    std::vector<std::vector<int>> spatialGrid(hashDim * hashDim * hashDim);
+    for (int pIdx = 0; pIdx < n; ++pIdx) {
+        const auto& pt = points[pIdx];
+        int gx = std::clamp(static_cast<int>((pt.x - minX) / hStepX), 0, hashDim - 1);
+        int gy = std::clamp(static_cast<int>((pt.y - minY) / hStepY), 0, hashDim - 1);
+        int gz = std::clamp(static_cast<int>((pt.z - minZ) / hStepZ), 0, hashDim - 1);
+        int cellIdx = (gx * hashDim + gy) * hashDim + gz;
+        spatialGrid[cellIdx].push_back(pIdx);
+    }
 
     // Her noktanın k-NN ortalama mesafesini hesapla
     std::vector<float> meanDists(n, 0.0f);
@@ -201,11 +257,11 @@ void NpuSORFilter::Filter(std::vector<Point3D>& points) const {
     #pragma omp parallel
     {
         std::vector<float> localDists;
-        localDists.reserve(n - 1);
+        localDists.reserve(1000); // 3x3x3 hücre ortalaması için
         
         #pragma omp for schedule(dynamic, 64)
         for (int i = 0; i < n; ++i) {
-            meanDists[i] = knnMeanDistance(points, i, localDists);
+            meanDists[i] = knnMeanDistance(points, i, spatialGrid, hashDim, minX, minY, minZ, hStepX, hStepY, hStepZ, localDists);
         }
     }
 

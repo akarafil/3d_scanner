@@ -75,7 +75,14 @@ private:
     int   m_k;
     float m_stdMul;
 
-    float knnMeanDistance(const std::vector<Point3D>& pts, int idx, std::vector<float>& distsBuffer) const;
+    float knnMeanDistance(
+        const std::vector<Point3D>& pts, 
+        int idx, 
+        const std::vector<std::vector<int>>& spatialGrid, 
+        int hashDim, 
+        float minX, float minY, float minZ, 
+        float hStepX, float hStepY, float hStepZ, 
+        std::vector<float>& distsBuffer) const;
 };
 
 // -------------------------------------------------------

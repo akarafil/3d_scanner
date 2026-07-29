@@ -4,9 +4,7 @@
 #include <android/log.h>
 #include <arm_neon.h>
 #include "hardware/zerocopy_buffer.h"
-#include "npu/qnn_depth_pipeline.h"
 #include "npu/npu_denoise_engine.h"
-#include "fusion/adaptive_depth_fusion.h"
 #include "thermal/thread_affinity.h"
 #include <mutex>
 #include "mesh/poisson_deferred.h"
@@ -14,17 +12,15 @@
 #define LOG_TAG "NativeBridge"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 
-static QNNDepthEngine g_qnnEngine;
 static NpuDenoiseEngine g_denoiseEngine;
 static PoissonDeferredReconstruction g_poissonRecon;
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_magicv3_scanner3d_MainActivity_initNativeEngine(JNIEnv* env, jobject /* this */) {
     LOGI("Initializing Magic3D Native Engine on Honor Magic V3...");
-    bool npuOk = g_qnnEngine.InitializeHTP();
     g_denoiseEngine.Reset(); // NPU denoise pipeline başlat
-    LOGI("NpuDenoiseEngine hazır: Temporal + Bilateral(9x9) + SOR pipeline aktif.");
-    return static_cast<jboolean>(npuOk);
+    LOGI("NpuDenoiseEngine hazır: Temporal + Bilateral(5x5) + SOR pipeline aktif.");
+    return static_cast<jboolean>(true);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -152,57 +148,7 @@ Java_com_magicv3_scanner3d_MainActivity_exportPointCloudMesh(JNIEnv* env, jobjec
     return static_cast<jboolean>(success);
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_magicv3_scanner3d_MainActivity_fuseDepthMapsNative(
-    JNIEnv* env, jobject /* this */,
-    jfloatArray arcoreDepthArr, jfloatArray arcoreConfArr,
-    jfloatArray stereoDepthArr, jbyteArray rgbImgArr,
-    jfloatArray outputArr, jint width, jint height) {
 
-    jfloat* arcoreDepth = env->GetFloatArrayElements(arcoreDepthArr, nullptr);
-    jfloat* arcoreConf  = env->GetFloatArrayElements(arcoreConfArr,  nullptr);
-    jfloat* stereoDepth = env->GetFloatArrayElements(stereoDepthArr, nullptr);
-    jbyte*  rgbImg      = env->GetByteArrayElements(rgbImgArr,       nullptr);
-    jfloat* output      = env->GetFloatArrayElements(outputArr,       nullptr);
-
-    const uint8_t* rgb = reinterpret_cast<const uint8_t*>(rgbImg);
-    const int N = width * height;
-
-    // -----------------------------------------------
-    //  Aşama 1: Adaptif Derinlik Füzyonu (ARCore + Stereo)
-    // -----------------------------------------------
-    std::vector<float> fusedDepth(N);
-    FuseDepthMaps(
-        arcoreDepth, arcoreConf, stereoDepth,
-        rgb, fusedDepth.data(), width, height
-    );
-
-    // -----------------------------------------------
-    //  Aşama 2: NPU 3-Aşamalı Parazit Temizleme Pipeline'ı
-    //    2a. Temporal EWM Stabilizer (kare titreşme bastırma)
-    //    2b. Joint Bilateral Filter 9x9 (RGB-guided, kenar korumalı)
-    // -----------------------------------------------
-    std::vector<float> denoisedDepth(N);
-    g_denoiseEngine.ProcessDepthFrame(
-        fusedDepth.data(),
-        rgb,
-        denoisedDepth.data(),
-        width, height
-    );
-
-    // -----------------------------------------------
-    //  Aşama 3: QNN Bilateral Refinement (ek kenar keskinleştirme)
-    // -----------------------------------------------
-    g_qnnEngine.ExecuteDepthRefinement(
-        denoisedDepth.data(), rgb, output, width, height
-    );
-
-    env->ReleaseFloatArrayElements(arcoreDepthArr, arcoreDepth, JNI_ABORT);
-    env->ReleaseFloatArrayElements(arcoreConfArr,  arcoreConf,  JNI_ABORT);
-    env->ReleaseFloatArrayElements(stereoDepthArr, stereoDepth, JNI_ABORT);
-    env->ReleaseByteArrayElements(rgbImgArr,       rgbImg,      JNI_ABORT);
-    env->ReleaseFloatArrayElements(outputArr,       output,      0);
-}
 
 // ============================================================
 //  ZERO-COPY NATIVE FRAME PROCESSOR
@@ -233,9 +179,17 @@ Java_com_magicv3_scanner3d_MainActivity_processFrameNative(
     const uint8_t* vRaw = vDirectBuf ? static_cast<const uint8_t*>(env->GetDirectBufferAddress(vDirectBuf)) : nullptr;
 
     int N = width * height;
-    std::vector<float> arcoreDepth(N);
-    std::vector<float> arcoreConf(N, 1.0f);
-    std::vector<uint8_t> rgbImg(N * 3, 128);
+    
+    // Per-frame bellek atıklarını (heap allocation churn) önlemek için static thread_local kullanım
+    static thread_local std::vector<float> arcoreDepth;
+    static thread_local std::vector<float> arcoreConf;
+    static thread_local std::vector<uint8_t> rgbImg;
+    static thread_local std::vector<float> fusedOutput;
+
+    arcoreDepth.assign(N, 0.0f);
+    arcoreConf.assign(N, 1.0f);
+    rgbImg.assign(N * 3, 128);
+    fusedOutput.assign(N, 0.0f);
 
     // 1. Convert Depth & Confidence
     for (int y = 0; y < height; ++y) {
@@ -322,8 +276,7 @@ Java_com_magicv3_scanner3d_MainActivity_processFrameNative(
         }
     }
 
-    // 3. Process Depth Frame (NPU / Vulkan / OpenMP Denoise Pipeline)
-    std::vector<float> fusedOutput(N);
+    // 3. Process Depth Frame (GPU / CPU Denoise Pipeline)
     g_denoiseEngine.ProcessDepthFrame(
         arcoreDepth.data(),
         rgbImg.data(),
