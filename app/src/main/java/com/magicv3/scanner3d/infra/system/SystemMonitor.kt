@@ -2,7 +2,13 @@ package com.magicv3.scanner3d.infra.system
 
 import android.app.ActivityManager
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
 import android.os.Debug
+import android.os.PowerManager
+import android.os.Process
+import android.os.SystemClock
 import android.util.Log
 import com.magicv3.scanner3d.domain.model.RamMetrics
 import com.magicv3.scanner3d.domain.model.CpuMetrics
@@ -66,6 +72,7 @@ class SystemMonitor(
         private const val PROC_SELF_STAT_PATH = "/proc/self/stat"
         private const val THERMAL_BASE_PATH = "/sys/class/thermal"
         private const val THERMAL_INTERVAL_MS = 2000L
+        private const val THERMAL_FALLBACK_INTERVAL_MS = 3000L
     }
 
     // Application context — SystemMonitor uzun ömürlü olabilir
@@ -220,22 +227,62 @@ class SystemMonitor(
      * @return Cold Flow<CpuMetrics>
      */
     fun monitorCpu(intervalMs: Long = DEFAULT_INTERVAL_MS): Flow<CpuMetrics> = flow {
-        // İlk snapshot'ı al ama emit etme — delta referansı olarak sakla
-        var previous = readCpuSnapshot()
+        // Önce native /proc dene
+        val initialSnapshot = readCpuSnapshot()
+        val nativeProcStatAvailable = initialSnapshot.coreCount > 0
 
-        // İlk emit: delta yok, EMPTY dön (HUD ilk frame'de 0% gösterir)
-        emit(CpuMetrics.EMPTY.copy(
-            coreCount = previous.coreCount,
-            uptimeJiffies = previous.uptimeJiffies,
-            timestamp = System.currentTimeMillis()
-        ))
+        if (nativeProcStatAvailable) {
+            // /proc/stat erişilebilir — Plan A (delta-based)
+            var previous = initialSnapshot
+            emit(CpuMetrics.EMPTY.copy(
+                coreCount = previous.coreCount,
+                uptimeJiffies = previous.uptimeJiffies,
+                timestamp = System.currentTimeMillis()
+            ))
+            while (true) {
+                delay(intervalMs)
+                val current = readCpuSnapshot()
+                emit(computeCpuDelta(previous, current))
+                previous = current
+            }
+        } else {
+            // /proc/stat bloke — Plan B (app CPU time delta)
+            Log.w(TAG, "/proc/stat blocked — using platform API fallback (app CPU only)")
+            var prevAppCpuMs = Process.getElapsedCpuTime()
+            var prevWallMs = SystemClock.elapsedRealtime()
+            val coreCount = Runtime.getRuntime().availableProcessors()
 
-        while (true) {
-            delay(intervalMs)
-            val current = readCpuSnapshot()
-            val metrics = computeCpuDelta(previous, current)
-            emit(metrics)
-            previous = current
+            // İlk emit
+            emit(CpuMetrics.EMPTY.copy(
+                coreCount = coreCount,
+                uptimeJiffies = 0L,
+                timestamp = System.currentTimeMillis()
+            ))
+
+            while (true) {
+                delay(intervalMs)
+                val currAppCpuMs = Process.getElapsedCpuTime()
+                val currWallMs = SystemClock.elapsedRealtime()
+                val deltaAppMs = (currAppCpuMs - prevAppCpuMs).coerceAtLeast(0L)
+                val deltaWallMs = (currWallMs - prevWallMs).coerceAtLeast(1L)
+                // App CPU% — tüm çekirdekler bazında kapasite normalize edildi
+                // (delta_app_ms / (delta_wall_ms × core_count)) × 100
+                val appUsagePercent = ((deltaAppMs * 100L) / (deltaWallMs * coreCount))
+                    .toInt().coerceIn(0, 100)
+                // Per-core breakdown yok — app'i dağıtık göster (her core'a ortalama)
+                val perCoreUsage = List(coreCount) { appUsagePercent }
+
+                emit(CpuMetrics(
+                    totalUsagePercent = appUsagePercent,
+                    perCoreUsagePercents = perCoreUsage,
+                    appUsagePercent = appUsagePercent,
+                    coreCount = coreCount,
+                    uptimeJiffies = currWallMs,
+                    timestamp = System.currentTimeMillis()
+                ))
+                prevAppCpuMs = currAppCpuMs
+                prevWallMs = currWallMs
+            }
         }
     }.flowOn(Dispatchers.IO)
 
@@ -500,9 +547,16 @@ class SystemMonitor(
      */
     fun monitorThermal(intervalMs: Long = THERMAL_INTERVAL_MS): Flow<ThermalMetrics> = flow {
         while (true) {
+            // Önce /sys/class/thermal dene — root cihazlarda çalışır
             val zones = readThermalSnapshot()
-            emit(computeThermalMetrics(zones))
-            delay(intervalMs)
+            val metrics = if (zones.isNotEmpty()) {
+                computeThermalMetrics(zones)
+            } else {
+                // Honor V3 fallback: PowerManager + BatteryManager
+                readThermalFromPlatformApis()
+            }
+            emit(metrics)
+            delay(if (zones.isEmpty()) THERMAL_FALLBACK_INTERVAL_MS else intervalMs)
         }
     }.flowOn(Dispatchers.IO)
 
@@ -643,6 +697,85 @@ class SystemMonitor(
             allZoneReadings = zones,
             throttlingLevel = throttlingLevel,
             throttleWarning = throttleWarning,
+            timestamp = System.currentTimeMillis()
+        )
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // THERMAL FALLBACK — Honor V3 SELinux block workaround (Phase 1.6.5)
+    // /sys/class/thermal sysfs_thermal context untrusted_app'a kapalı.
+    // Bu fallback PowerManager thermal status + BatteryManager sticky
+    // intent kullanır — Android platform API'leriyle Honor'da çalışır.
+    // ════════════════════════════════════════════════════════════════
+
+    /**
+     * PowerManager.ThermalStatus (0..6) → Celsius'a kabaca map.
+     * Status=NONE boş 0, ardından her seviye artışı ~10°C varsay.
+     */
+    private fun thermalStatusToCelsius(status: Int): Float {
+        return 35f + (status.coerceIn(0, 6) * 10f)
+    }
+
+    /**
+     * PowerManager.ThermalStatus → throttlingLevel (0/1/2)
+     */
+    private fun thermalStatusToThrottleLevel(status: Int): Int = when (status) {
+        in 0..2 -> 0
+        3 -> 1
+        else -> 2
+    }
+
+    /**
+     * PowerManager.ThermalStatus → throttleWarning bool
+     */
+    private fun thermalStatusToThrottleWarning(status: Int): Boolean = status >= 2
+
+    /**
+     * BatteryManager sticky intent'ten battery temp oku.
+     * Format: int × 0.1°C (270 = 27.0°C).
+     */
+    private fun readBatteryTempCelsius(): Float {
+        return try {
+            val intent = appContext.registerReceiver(
+                null,
+                IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+            ) ?: return 0f
+            val tempRaw = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1)
+            if (tempRaw > 0) tempRaw / 10.0f else 0f
+        } catch (e: Exception) {
+            Log.w(TAG, "Battery temp read failed", e)
+            0f
+        }
+    }
+
+    /**
+     * /sys/class/thermal erişilemiyorsa (SELinux block) bu fallback.
+     */
+    private fun readThermalFromPlatformApis(): ThermalMetrics {
+        var status = 0
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            val powerManager = appContext.getSystemService(PowerManager::class.java)
+            status = powerManager?.currentThermalStatus ?: 0
+        }
+
+        val socTempC = thermalStatusToCelsius(status)
+        val skinTempC = socTempC - 5f
+        val batteryTempC = readBatteryTempCelsius()
+        val gpuTempC = socTempC + 2f
+        val ispTempC = socTempC
+        val npuTempC = socTempC - 2f
+
+        return ThermalMetrics(
+            socTempC = socTempC,
+            skinTempC = skinTempC,
+            batteryTempC = batteryTempC,
+            gpuTempC = gpuTempC,
+            ispTempC = ispTempC,
+            npuTempC = npuTempC,
+            cpuZoneTempsC = emptyList(),
+            allZoneReadings = emptyList(),
+            throttlingLevel = thermalStatusToThrottleLevel(status),
+            throttleWarning = thermalStatusToThrottleWarning(status),
             timestamp = System.currentTimeMillis()
         )
     }
