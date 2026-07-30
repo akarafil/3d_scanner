@@ -2,10 +2,18 @@ package com.magicv3.scanner3d.ui.scan
 
 import android.util.Log
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -19,6 +27,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
@@ -33,6 +42,7 @@ import com.magicv3.scanner3d.ui.capture.CaptureState
 import com.magicv3.scanner3d.ui.hud.SystemHud
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.io.File
 
 /**
  * Ana tarama ekranı — kamera preview'ın host edildiği kök layout.
@@ -78,6 +88,9 @@ fun ScanScreen() {
     var lastCaptureLog by remember { mutableStateOf<String?>(null) }
     var triggerCounter by remember { mutableStateOf(0) }
 
+    // [Phase 2.1.2] — Toggle Mode: false = Burst (Tele x3), true = Multi-Lens (Tele + UW)
+    var multiLensMode by remember { mutableStateOf(false) }
+
     val orchestrator = remember { MultiLensCaptureOrchestrator(context) }
     val progressState by orchestrator.progress.collectAsStateWithLifecycle()
 
@@ -110,6 +123,44 @@ fun ScanScreen() {
                 .align(Alignment.TopStart)
         )
 
+        // [Phase 2.1.2] — Cyber-styled Toggle Mode Selector (TopCenter)
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 24.dp)
+                .background(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                    shape = RoundedCornerShape(20.dp)
+                )
+                .border(
+                    width = 1.dp,
+                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+                    shape = RoundedCornerShape(20.dp)
+                )
+                .clickable { multiLensMode = !multiLensMode }
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Mini LED indicator
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .background(
+                            color = if (multiLensMode) Color.Cyan else Color.Green,
+                            shape = CircleShape
+                        )
+                )
+                Text(
+                    text = if (multiLensMode) "MODE: MULTI-LENS (TELE + UW)" else "MODE: BURST ×3 (TELE)",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelMedium
+                )
+            }
+        }
+
         // [Phase 1.8] — CaptureButton (BottomCenter, thumb ergonomi)
         CaptureButton(
             state = captureState,
@@ -118,26 +169,49 @@ fun ScanScreen() {
 
                 triggerCounter++
                 captureState = CaptureState.CAPTURING
-                lastCaptureLog = "Tele burst ×3 starting…"
-                Log.i("ScanScreen", "Capture triggered (Phase 2.1.1 — burst)")
+                lastCaptureLog = if (multiLensMode) "Multi-lens capture starting…" else "Tele burst ×3 starting…"
+                Log.i("ScanScreen", "Capture triggered (Phase 2.1.2 — Mode: ${if (multiLensMode) "multi-lens" else "burst"})")
 
                 captureScope.launch {
-                    val files = orchestrator.captureBurst(
-                        lensId = RawAuxCaptureSession.AUX_TELEPHOTO_ID,
-                        count = 3,
-                    )
-                    captureState = if (files.isNotEmpty()) {
-                        CaptureState.DONE
+                    val filesOrMap: Any = if (multiLensMode) {
+                        orchestrator.captureMultiLens(
+                            lensIds = listOf(
+                                RawAuxCaptureSession.AUX_TELEPHOTO_ID,
+                                RawAuxCaptureSession.AUX_ULTRAWIDE_ID
+                            )
+                        )
                     } else {
-                        CaptureState.ERROR
+                        orchestrator.captureBurst(
+                            lensId = RawAuxCaptureSession.AUX_TELEPHOTO_ID,
+                            count = 3
+                        )
                     }
-                    lastCaptureLog = when (captureState) {
-                        CaptureState.DONE -> "✅ ${files.size}/3 Tele frames saved"
-                        else -> "❌ Burst failed — no frames"
+
+                    val fileCount: Int = if (multiLensMode) {
+                        @Suppress("UNCHECKED_CAST")
+                        val map = filesOrMap as Map<String, File>
+                        map.forEach { (k, v) ->
+                            Log.i("ScanScreen", "MultiLens[$k] → ${v.absolutePath} (${v.length()} B)")
+                        }
+                        map.size
+                    } else {
+                        @Suppress("UNCHECKED_CAST")
+                        val files = filesOrMap as List<File>
+                        files.forEachIndexed { idx, f ->
+                            Log.i("ScanScreen", "Burst[$idx] → ${f.absolutePath} (${f.length()} B)")
+                        }
+                        files.size
                     }
-                    files.forEachIndexed { idx, f ->
-                        Log.i("ScanScreen", "Burst[$idx] → ${f.absolutePath} (${f.length()} B)")
+
+                    captureState = if (fileCount > 0) CaptureState.DONE else CaptureState.ERROR
+                    lastCaptureLog = when {
+                        multiLensMode && fileCount == 2 -> "✅ Tele + UW frames saved (multi-lens OK)"
+                        multiLensMode && fileCount == 1 -> "⚠ Only one lens captured (other failed)"
+                        !multiLensMode && fileCount == 3 -> "✅ 3/3 Tele frames saved"
+                        !multiLensMode && fileCount > 0 -> "⚠ ${fileCount}/3 Tele frames saved"
+                        else -> "❌ No frames captured"
                     }
+
                     delay(if (captureState == CaptureState.DONE) 600 else 1500)
                     captureState = CaptureState.IDLE
                 }
