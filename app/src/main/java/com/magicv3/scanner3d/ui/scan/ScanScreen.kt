@@ -1,5 +1,6 @@
 package com.magicv3.scanner3d.ui.scan
 
+import android.util.Log
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -10,6 +11,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -17,7 +19,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import com.magicv3.scanner3d.infra.camera.CameraController
+import com.magicv3.scanner3d.ui.capture.CaptureButton
+import com.magicv3.scanner3d.ui.capture.CaptureState
 import com.magicv3.scanner3d.ui.hud.SystemHud
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * Ana tarama ekranı — kamera preview'ın host edildiği kök layout.
@@ -33,10 +39,11 @@ import com.magicv3.scanner3d.ui.hud.SystemHud
  * │                  (◯)                 │ ← [1.8] CaptureButton — BottomCenter
  * └──────────────────────────────────────┘
  *
- * Faz 1.7 (BU ADIM):
+ * Faz 1.8 (BU ADIM):
  * • CameraPreviewSurface PreviewView yaratır → onPreviewViewReady ile referans gelir
  * • LaunchedEffect(previewView) → CameraController.initialize() + bindPreview()
  * • SystemHud overlay sol üst köşeye yerleştirilir.
+ * • CaptureButton deklanşör butonu alt-ortaya yerleştirilir ve state machine tetiklenir.
  * • DisposableEffect → composition dispose'da unbind (Activity destroy)
  *
  * Lifecycle akışı:
@@ -56,6 +63,10 @@ fun ScanScreen() {
     // callback ile buraya iletilir. null → non-null geçişi bind'i tetikler.
     var previewView by remember { mutableStateOf<PreviewView?>(null) }
 
+    // [Phase 1.8] — Capture state + coroutine scope
+    var captureState by remember { mutableStateOf(CaptureState.IDLE) }
+    val captureScope = rememberCoroutineScope()
+
     Box(modifier = Modifier.fillMaxSize()) {
         CameraPreviewSurface(
             modifier = Modifier.fillMaxSize(),
@@ -74,7 +85,25 @@ fun ScanScreen() {
                 .align(Alignment.TopStart)
         )
 
-        // [Phase 1.8] — CaptureButton (Modifier.align(Alignment.BottomCenter).padding(48.dp))
+        // [Phase 1.8] — CaptureButton (BottomCenter, thumb ergonomi)
+        CaptureButton(
+            state = captureState,
+            onClick = {
+                // Phase 1.8 placeholder — gerçek pipeline Phase 2'de bağlanır
+                Log.i("Capture", "Capture triggered (placeholder — Phase 2 wire pipeline)")
+                captureScope.launch {
+                    captureState = CaptureState.CAPTURING
+                    // TODO Phase 2: ImageCapture takePhoto / scan sweep trigger
+                    delay(1500) // simülasyon — gerçek capture süresini temsil eder
+                    captureState = CaptureState.DONE
+                    delay(400)  // kısa yeşil feedback
+                    captureState = CaptureState.IDLE
+                }
+            },
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 48.dp)
+        )
     }
 
     // ── Camera Bind (previewView hazır olunca) ──────────────────────
