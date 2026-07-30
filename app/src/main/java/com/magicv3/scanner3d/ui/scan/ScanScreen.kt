@@ -14,6 +14,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -37,6 +41,7 @@ import com.magicv3.scanner3d.infra.camera.CameraLensCatalog
 import com.magicv3.scanner3d.infra.camera.AuxProbe
 import com.magicv3.scanner3d.infra.camera.RawAuxCaptureSession
 import com.magicv3.scanner3d.infra.camera.MultiLensCaptureOrchestrator
+import com.magicv3.scanner3d.infra.storage.SessionFrameStore
 import com.magicv3.scanner3d.ui.capture.CaptureButton
 import com.magicv3.scanner3d.ui.capture.CaptureState
 import com.magicv3.scanner3d.ui.hud.SystemHud
@@ -91,7 +96,11 @@ fun ScanScreen() {
     // [Phase 2.1.2] — Toggle Mode: false = Burst (Tele x3), true = Multi-Lens (Tele + UW)
     var multiLensMode by remember { mutableStateOf(false) }
 
-    val orchestrator = remember { MultiLensCaptureOrchestrator(context) }
+    // [Phase 2.3] — Storage projects and UI folder triggers
+    val sessionFrameStore = remember { SessionFrameStore(context) }
+    var showMyScans by remember { mutableStateOf(false) }
+
+    val orchestrator = remember { MultiLensCaptureOrchestrator(context, sessionFrameStore) }
     val progressState by orchestrator.progress.collectAsStateWithLifecycle()
 
     // ===== Faz 2.0 + 2.0.5 — Geçici catalog dump + aux probe =====
@@ -161,6 +170,29 @@ fun ScanScreen() {
             }
         }
 
+        // [Phase 2.3] — Taramalarım (My Scans) Folder Button (TopEnd)
+        IconButton(
+            onClick = { showMyScans = true },
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(top = 24.dp, end = 24.dp)
+                .background(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                    shape = CircleShape
+                )
+                .border(
+                    width = 1.dp,
+                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+                    shape = CircleShape
+                )
+        ) {
+            Icon(
+                imageVector = Icons.Default.Folder,
+                contentDescription = "Taramalarım",
+                tint = MaterialTheme.colorScheme.primary
+            )
+        }
+
         // [Phase 1.8] — CaptureButton (BottomCenter, thumb ergonomi)
         CaptureButton(
             state = captureState,
@@ -173,6 +205,9 @@ fun ScanScreen() {
                 Log.i("ScanScreen", "Capture triggered (Phase 2.1.2 — Mode: ${if (multiLensMode) "multi-lens" else "burst"})")
 
                 captureScope.launch {
+                    // Create new session directory & meta file for this scan trigger
+                    orchestrator.startNewSession(sessionFrameStore)
+
                     val filesOrMap: Any = if (multiLensMode) {
                         orchestrator.captureMultiLens(
                             lensIds = listOf(
@@ -261,6 +296,14 @@ fun ScanScreen() {
                     .padding(bottom = 132.dp)
             )
         }
+    }
+
+    // [Phase 2.3] — Show/Hide "Taramalarım" Screen Dialog
+    if (showMyScans) {
+        MyScansScreen(
+            store = sessionFrameStore,
+            onClose = { showMyScans = false }
+        )
     }
 
     // ── Camera Bind (previewView hazır olunca) ──────────────────────

@@ -13,6 +13,9 @@ import java.io.File
 import java.io.IOException
 import java.util.UUID
 
+import com.magicv3.scanner3d.domain.model.ScanSession
+import com.magicv3.scanner3d.infra.storage.SessionFrameStore
+
 /**
  * Phase 2.2.1 — Multi-lens capture orchestrator.
  *
@@ -29,6 +32,7 @@ import java.util.UUID
  */
 class MultiLensCaptureOrchestrator(
     private val context: Context,
+    private val frameStore: SessionFrameStore = SessionFrameStore(context),
     private val outputDir: File =
         File(context.filesDir, "aux_captures").apply { mkdirs() },
 ) {
@@ -63,6 +67,13 @@ class MultiLensCaptureOrchestrator(
     private val exifWriter = AuxExifWriter()
     private var auxLensMap: Map<String, CameraLens>? = null
 
+    var activeSession: ScanSession? = null
+        private set
+
+    suspend fun startNewSession(store: SessionFrameStore, name: String? = null) {
+        activeSession = store.createSession(name)
+    }
+
     private suspend fun getAuxLensMap(): Map<String, CameraLens> = withContext(Dispatchers.IO) {
         synchronized(this@MultiLensCaptureOrchestrator) {
             auxLensMap
@@ -88,7 +99,7 @@ class MultiLensCaptureOrchestrator(
         val raw = captureWithRetry(lensId, attempt = 0) ?: return null
         val (w, h) = runCatching { readImageSize(raw) }.getOrDefault(Pair(0, 0))
         val lens = getAuxLensMap()[lensId]
-        return exifWriter.stamp(
+        val stamped = exifWriter.stamp(
             jpegFile = raw,
             lensId = lensId,
             lens = lens,
@@ -96,6 +107,19 @@ class MultiLensCaptureOrchestrator(
             height = h,
             sessionId = sessionId
         )
+        if (stamped != null) {
+            activeSession?.let { session ->
+                val updatedSession = frameStore.appendFrame(
+                    session = session,
+                    sourceJpeg = stamped,
+                    lensId = lensId,
+                    lensType = lens?.lensType?.name ?: "UNKNOWN",
+                    focalMm = lens?.focalLengthMm ?: 0f
+                )
+                activeSession = updatedSession
+            }
+        }
+        return stamped
     }
 
     /**
@@ -106,7 +130,7 @@ class MultiLensCaptureOrchestrator(
         lensId: String = DEFAULT_LENS,
         count: Int = DEFAULT_BURST,
     ): List<File> = withContext(Dispatchers.IO) {
-        val sessionId = UUID.randomUUID()
+        val sessionId = activeSession?.sessionId ?: UUID.randomUUID()
         val files = mutableListOf<File>()
         for (i in 0 until count) {
             _progress.value = CaptureProgress.FrameStarted(i, count, lensId)
@@ -134,7 +158,7 @@ class MultiLensCaptureOrchestrator(
             RawAuxCaptureSession.AUX_ULTRAWIDE_ID,
         ),
     ): Map<String, File> = withContext(Dispatchers.IO) {
-        val sessionId = UUID.randomUUID()
+        val sessionId = activeSession?.sessionId ?: UUID.randomUUID()
         val result = LinkedHashMap<String, File>()
         for (id in lensIds) {
             _progress.value = CaptureProgress.FrameStarted(result.size, lensIds.size, id)
