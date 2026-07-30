@@ -4,7 +4,9 @@ import android.util.Log
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -20,10 +22,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.magicv3.scanner3d.infra.camera.CameraController
 import com.magicv3.scanner3d.infra.camera.CameraLensCatalog
 import com.magicv3.scanner3d.infra.camera.AuxProbe
 import com.magicv3.scanner3d.infra.camera.RawAuxCaptureSession
+import com.magicv3.scanner3d.infra.camera.MultiLensCaptureOrchestrator
 import com.magicv3.scanner3d.ui.capture.CaptureButton
 import com.magicv3.scanner3d.ui.capture.CaptureState
 import com.magicv3.scanner3d.ui.hud.SystemHud
@@ -74,6 +78,9 @@ fun ScanScreen() {
     var lastCaptureLog by remember { mutableStateOf<String?>(null) }
     var triggerCounter by remember { mutableStateOf(0) }
 
+    val orchestrator = remember { MultiLensCaptureOrchestrator(context) }
+    val progressState by orchestrator.progress.collectAsStateWithLifecycle()
+
     // ===== Faz 2.0 + 2.0.5 — Geçici catalog dump + aux probe =====
     LaunchedEffect(Unit) {
         runCatching {
@@ -111,25 +118,27 @@ fun ScanScreen() {
 
                 triggerCounter++
                 captureState = CaptureState.CAPTURING
-                lastCaptureLog = "Tele (id=4) capture triggered…"
-                Log.i("ScanScreen", "Capture triggered (Phase 2.1.0 — Tele bypass)")
+                lastCaptureLog = "Tele burst ×3 starting…"
+                Log.i("ScanScreen", "Capture triggered (Phase 2.1.1 — burst)")
 
                 captureScope.launch {
-                    val result = RawAuxCaptureSession(context).captureSingleFrame()
-                    result
-                        .onSuccess { file ->
-                            captureState = CaptureState.DONE
-                            lastCaptureLog = "✅ Tele frame saved: ${file.name} (${file.length()} B)"
-                            Log.i("ScanScreen", "Tele JPEG: ${file.absolutePath}")
-                        }
-                        .onFailure { err ->
-                            captureState = CaptureState.ERROR
-                            lastCaptureLog = "❌ Tele capture failed: ${err.message}"
-                            Log.e("ScanScreen", "Tele capture failed", err)
-                        }
-
-                    // Auto-return to IDLE for next capture
-                    delay(if (captureState == CaptureState.DONE) 400 else 1500)
+                    val files = orchestrator.captureBurst(
+                        lensId = RawAuxCaptureSession.AUX_TELEPHOTO_ID,
+                        count = 3,
+                    )
+                    captureState = if (files.isNotEmpty()) {
+                        CaptureState.DONE
+                    } else {
+                        CaptureState.ERROR
+                    }
+                    lastCaptureLog = when (captureState) {
+                        CaptureState.DONE -> "✅ ${files.size}/3 Tele frames saved"
+                        else -> "❌ Burst failed — no frames"
+                    }
+                    files.forEachIndexed { idx, f ->
+                        Log.i("ScanScreen", "Burst[$idx] → ${f.absolutePath} (${f.length()} B)")
+                    }
+                    delay(if (captureState == CaptureState.DONE) 600 else 1500)
                     captureState = CaptureState.IDLE
                 }
             },
@@ -137,6 +146,35 @@ fun ScanScreen() {
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 48.dp)
         )
+
+        // Progress bar (Phase 2.1.1 diagnostic, alt-orta)
+        when (val p = progressState) {
+            is MultiLensCaptureOrchestrator.CaptureProgress.FrameStarted ->
+                LinearProgressIndicator(
+                    progress = { (p.index + 1f) / p.total },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 124.dp)
+                        .fillMaxWidth(0.6f)
+                )
+            is MultiLensCaptureOrchestrator.CaptureProgress.FrameSuccess ->
+                LinearProgressIndicator(
+                    progress = { (p.index + 1f) / p.total },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 124.dp)
+                        .fillMaxWidth(0.6f)
+                )
+            is MultiLensCaptureOrchestrator.CaptureProgress.FrameFailure ->
+                LinearProgressIndicator(
+                    progress = { (p.index + 1f) / p.total },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 124.dp)
+                        .fillMaxWidth(0.6f)
+                )
+            else -> { /* idle / done: hide bar */ }
+        }
 
         // Optional small status text under the shutter (Phase 2.1.0 diagnostic)
         lastCaptureLog?.let { log ->
