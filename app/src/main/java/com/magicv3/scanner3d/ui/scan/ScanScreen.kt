@@ -205,10 +205,10 @@ fun ScanScreen() {
 
                     captureState = if (fileCount > 0) CaptureState.DONE else CaptureState.ERROR
                     lastCaptureLog = when {
-                        multiLensMode && fileCount == 2 -> "✅ Tele + UW frames saved (multi-lens OK)"
-                        multiLensMode && fileCount == 1 -> "⚠ Only one lens captured (other failed)"
-                        !multiLensMode && fileCount == 3 -> "✅ 3/3 Tele frames saved"
-                        !multiLensMode && fileCount > 0 -> "⚠ ${fileCount}/3 Tele frames saved"
+                        multiLensMode && fileCount == 2 -> "✅ Tele + UW frames saved (multi-lens OK) — EXIF stamped"
+                        multiLensMode && fileCount == 1 -> "⚠ Only one lens captured (EXIF partial)"
+                        !multiLensMode && fileCount == 3 -> "✅ 3/3 Tele frames saved — EXIF stamped"
+                        !multiLensMode && fileCount > 0 -> "⚠ ${fileCount}/3 Tele frames saved — EXIF stamped"
                         else -> "❌ No frames captured"
                     }
 

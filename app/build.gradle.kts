@@ -73,6 +73,9 @@ dependencies {
     // Lifecycle Compose — collectAsStateWithLifecycle için
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.7.0")
 
+    // ExifInterface for JPEG metadata stamping (SfM photogrammetry)
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
+
     // Testing
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")

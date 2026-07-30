@@ -32,7 +32,8 @@ data class CameraLens(
     val megapixels: Float,
     val zoomRatioVsMain: Float,
     val isPhysical: Boolean,
-    val hasLogicalMultiCamera: Boolean
+    val hasLogicalMultiCamera: Boolean,
+    val sensorOrientationDegrees: Int = 90
 ) {
     /** Kısa log-friendly biçim — logcat'e yazdırmak için */
     fun toLogString(): String {

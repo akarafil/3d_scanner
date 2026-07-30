@@ -192,6 +192,7 @@ class CameraLensCatalog(private val context: Context) {
         } else { 1.0f }
 
         val lensType = classifyLensType(focalMm, zoomRatio, facing, megapixels)
+        val sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
 
         return CameraLens(
             logicalId = logicalId,
@@ -205,7 +206,8 @@ class CameraLensCatalog(private val context: Context) {
             megapixels = megapixels,
             zoomRatioVsMain = zoomRatio,
             isPhysical = isPhysical,
-            hasLogicalMultiCamera = hasLogicalMultiCamera
+            hasLogicalMultiCamera = hasLogicalMultiCamera,
+            sensorOrientationDegrees = sensorOrientation
         )
     }
 
