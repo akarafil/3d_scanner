@@ -2,6 +2,7 @@ package com.magicv3.scanner3d.ui.scan
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -33,6 +34,7 @@ import kotlinx.coroutines.launch
 fun MyScansScreen(
     store: SessionFrameStore,
     onClose: () -> Unit,
+    onOpen: (ScanSession) -> Unit,
 ) {
     val sessions by store.sessions.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -100,6 +102,7 @@ fun MyScansScreen(
                 items(sessions, key = { it.sessionId }) { session ->
                     ProjectRow(
                         session = session,
+                        onOpen = { onOpen(session) },
                         onDelete = { pendingDelete = session },
                         onRename = { newName ->
                             scope.launch { store.renameSession(session.sessionId, newName) }
@@ -140,6 +143,7 @@ fun MyScansScreen(
 @Composable
 private fun ProjectRow(
     session: ScanSession,
+    onOpen: () -> Unit,
     onDelete: () -> Unit,
     onRename: (String) -> Unit,
 ) {
@@ -156,6 +160,7 @@ private fun ProjectRow(
                 color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
                 shape = RoundedCornerShape(16.dp)
             )
+            .clickable(enabled = !renaming) { onOpen() }
             .padding(16.dp)
     ) {
         Column {

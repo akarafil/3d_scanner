@@ -14,7 +14,7 @@ import java.io.File
 import java.util.UUID
 
 /**
- * Phase 2.3 — Tarama session'larını (projeleri) disk üzerinde yönetir.
+ * Phase 2.3 & 2.5 — Tarama session'larını (projeleri) disk üzerinde yönetir.
  *
  * Roller:
  *  - createSession() : yeni UUID + klasör + meta.json üretir
@@ -44,7 +44,7 @@ class SessionFrameStore(private val context: Context) {
 
     /**
      * Capture trigger anında çağrılır → yeni bir proje oluşturur ve döner.
-     * projectName boşsa otomatik isim verilir (örn: "Tarama 2026-07-30 20:05").
+     * projectName boşsa otomatik isim verilir (örn: "Tarama 2026-07-30 20:05:43").
      */
     suspend fun createSession(projectName: String? = null): ScanSession =
         withContext(Dispatchers.IO) {
@@ -52,23 +52,43 @@ class SessionFrameStore(private val context: Context) {
             val folder = File(rootDir, "session_$id").apply { mkdirs() }
             File(folder, "frames").mkdirs()
             val now = System.currentTimeMillis()
-            val name = projectName?.takeIf { it.isNotBlank() }
-                ?: "Tarama " + java.text.SimpleDateFormat(
-                    "yyyy-MM-dd HH:mm", java.util.Locale("tr")
+
+            // [Phase 2.5] Auto-name uniqueness: saniye hassasiyeti + mevcut isim çakışması varsa counter
+            val autoName = projectName?.takeIf { it.isNotBlank() } ?: run {
+                val baseTime = java.text.SimpleDateFormat(
+                    "yyyy-MM-dd HR:mm:ss", java.util.Locale("tr")
                 ).format(java.util.Date(now))
+                "Tarama $baseTime"
+            }
+            val finalName = ensureUniqueProjectName(autoName)
+
             val session = ScanSession(
                 sessionId = id,
-                projectName = name,
+                projectName = finalName,
                 createdAtMs = now,
                 frames = emptyList(),
                 totalBytes = 0L,
                 folder = folder,
             )
             writeMeta(session)
-            android.util.Log.i(TAG, "Created session: $name (folder=$folder)")
+            android.util.Log.i(TAG, "Created session: $finalName (folder=$folder)")
             refresh()
             session
         }
+
+    /**
+     * [Phase 2.5] Aynı projectName zaten varsa " (#2)", " (#3)"... suffix ekler.
+     */
+    private fun ensureUniqueProjectName(base: String): String {
+        val taken = _sessions.value.map { it.projectName }.toMutableSet()
+        rootDir.listFiles { f -> f.isDirectory }?.forEach { dir ->
+            ScanSession.fromJson(dir)?.let { taken.add(it.projectName) }
+        }
+        if (base !in taken) return base
+        var counter = 2
+        while ("$base (#$counter)" in taken) counter++
+        return "$base (#$counter)"
+    }
 
     /**
      * Bir JPEG dosyasını aktif session'ın frames/ klasörüne taşır ve meta'yı günceller.
@@ -81,16 +101,28 @@ class SessionFrameStore(private val context: Context) {
         lensType: String,
         focalMm: Float,
     ): ScanSession = withContext(Dispatchers.IO) {
-        val target = File(File(session.folder, "frames"), sourceJpeg.name)
-        sourceJpeg.copyTo(target, overwrite = true)
+        // [Phase 2.5] Guaranteed-unique filename: frame_{seqNo padded 3}_{lensId}_{capturedAtMs}.jpg
+        val seqNo = session.frames.size + 1
+        val seqStr = String.format(java.util.Locale.US, "%03d", seqNo)
+        val safeLens = lensId.replace(Regex("[^A-Za-z0-9_-]"), "")
+        val capturedMs = System.currentTimeMillis()
+        val targetName = "frame_${seqStr}_${safeLens}_${capturedMs}.jpg"
+        val target = File(File(session.folder, "frames"), targetName)
+
+        sourceJpeg.copyTo(target, overwrite = false)
+        if (target.exists() && target.length() == 0L) {
+            target.delete()
+            return@withContext session
+        }
         sourceJpeg.delete()
+
         val frame = ScanFrame(
             file = target,
             lensId = lensId,
             lensType = lensType,
             focalMm = focalMm,
             bytes = target.length(),
-            capturedAtMs = System.currentTimeMillis(),
+            capturedAtMs = capturedMs,
         )
         // meta.json'a ekle → atomic rewrite
         val updated = session.copy(
@@ -99,7 +131,7 @@ class SessionFrameStore(private val context: Context) {
         )
         writeMeta(updated)
         android.util.Log.i(TAG,
-            "Appended frame to ${session.projectName}: ${frame.file.name} (${frame.bytes} B)")
+            "Appended frame #${seqStr} to ${session.projectName}: $targetName (${frame.bytes} B)")
         refresh()
         updated
     }

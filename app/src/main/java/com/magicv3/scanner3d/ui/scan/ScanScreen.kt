@@ -1,5 +1,6 @@
 package com.magicv3.scanner3d.ui.scan
 
+import android.net.Uri
 import android.util.Log
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
@@ -7,9 +8,12 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -21,6 +25,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.AlertDialog
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -36,12 +42,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.magicv3.scanner3d.domain.model.ScanSession
 import com.magicv3.scanner3d.infra.camera.CameraController
 import com.magicv3.scanner3d.infra.camera.CameraLensCatalog
 import com.magicv3.scanner3d.infra.camera.AuxProbe
 import com.magicv3.scanner3d.infra.camera.RawAuxCaptureSession
 import com.magicv3.scanner3d.infra.camera.MultiLensCaptureOrchestrator
 import com.magicv3.scanner3d.infra.storage.SessionFrameStore
+import com.magicv3.scanner3d.infra.storage.ZipExporter
 import com.magicv3.scanner3d.ui.capture.CaptureButton
 import com.magicv3.scanner3d.ui.capture.CaptureState
 import com.magicv3.scanner3d.ui.hud.SystemHud
@@ -49,33 +57,16 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 
+// [Phase 2.6] ZIP Export State
+sealed interface ZipShareState {
+    data object Idle : ZipShareState
+    data class Zipping(val total: Int) : ZipShareState
+    data class Done(val uri: Uri, val displaySize: String) : ZipShareState
+    data class Failed(val message: String) : ZipShareState
+}
+
 /**
  * Ana tarama ekranı — kamera preview'ın host edildiği kök layout.
- *
- * Layout planı (full Phase 1 sonrası):
- * ┌──────────────────────────────────────┐
- * │                                     ▒│ ← [1.7] SystemHud — TopStart (RAM/CPU/SoC)
- * │                                     ▒│
- * │           KAMERA ÖNİZLEME             │ ← CameraPreviewSurface
- * │           (TextureView, 1.3'te canlı) │
- * │                                      │
- * │                                      │
- * │                  (◯)                 │ ← [1.8] CaptureButton — BottomCenter
- * └──────────────────────────────────────┘
- *
- * Faz 1.8 (BU ADIM):
- * • CameraPreviewSurface PreviewView yaratır → onPreviewViewReady ile referans gelir
- * • LaunchedEffect(previewView) → CameraController.initialize() + bindPreview()
- * • SystemHud overlay sol üst köşeye yerleştirilir.
- * • CaptureButton deklanşör butonu alt-ortaya yerleştirilir ve state machine tetiklenir.
- * • DisposableEffect → composition dispose'da unbind (Activity destroy)
- *
- * Lifecycle akışı:
- *   Activity onStart → bindToLifecycle (CameraX otomatik)
- *   Activity onStop  → capture session close (CameraX otomatik)
- *   Activity destroy → DisposableEffect.onDispose → unbind()
- *
- * Ön koşul: Kamera izni GRANTED (MainActivity router).
  */
 @Composable
 fun ScanScreen() {
@@ -83,22 +74,24 @@ fun ScanScreen() {
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraController = remember { CameraController(context, lifecycleOwner) }
 
-    // PreviewView referansı — CameraPreviewSurface factory'de yaratılır,
-    // callback ile buraya iletilir. null → non-null geçişi bind'i tetikler.
     var previewView by remember { mutableStateOf<PreviewView?>(null) }
 
-    // [Phase 1.8] — Capture state + coroutine scope
     var captureState by remember { mutableStateOf(CaptureState.IDLE) }
     val captureScope = rememberCoroutineScope()
     var lastCaptureLog by remember { mutableStateOf<String?>(null) }
     var triggerCounter by remember { mutableStateOf(0) }
 
-    // [Phase 2.1.2] — Toggle Mode: false = Burst (Tele x3), true = Multi-Lens (Tele + UW)
     var multiLensMode by remember { mutableStateOf(false) }
 
-    // [Phase 2.3] — Storage projects and UI folder triggers
     val sessionFrameStore = remember { SessionFrameStore(context) }
     var showMyScans by remember { mutableStateOf(false) }
+    
+    // [Phase 2.4] openedSession state for ScanDetailScreen overlay
+    var openedSession by remember { mutableStateOf<ScanSession?>(null) }
+
+    // [Phase 2.6] Zip sharing status and exporter
+    var zipShareState by remember { mutableStateOf<ZipShareState>(ZipShareState.Idle) }
+    val zipExporter = remember { ZipExporter(context) }
 
     val orchestrator = remember { MultiLensCaptureOrchestrator(context, sessionFrameStore) }
     val progressState by orchestrator.progress.collectAsStateWithLifecycle()
@@ -114,17 +107,33 @@ fun ScanScreen() {
     }
     // ===== Geçici dump sonu (Faz 2.4'te kaldırılacak) =====
 
+    fun triggerZipShare(session: ScanSession) {
+        captureScope.launch {
+            zipShareState = ZipShareState.Zipping(session.frameCount)
+            runCatching {
+                zipExporter.export(session)
+            }.onSuccess { result ->
+                zipShareState = ZipShareState.Done(result.uri, String.format(java.util.Locale.US, "%.1f MB", result.sizeBytes / 1_000_000.0))
+                zipExporter.launchShareSheet(result, session.projectName)
+                delay(2000)
+                zipShareState = ZipShareState.Idle
+            }.onFailure { e ->
+                Log.e("ScanScreen", "ZIP export failed", e)
+                zipShareState = ZipShareState.Failed(e.message ?: "Bilinmeyen hata")
+                delay(2500)
+                zipShareState = ZipShareState.Idle
+            }
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         CameraPreviewSurface(
             modifier = Modifier.fillMaxSize(),
             onPreviewViewReady = { pv ->
-                // AndroidView factory yaratıldığında çağrılır (composition'da).
-                // Sadece referansı saklıyoruz — side-effect composition'da değil.
                 previewView = pv
             }
         )
 
-        // [Phase 1.7] — SystemHud overlay (Modifier.align(Alignment.TopStart).padding(8.dp))
         SystemHud(
             context = context,
             modifier = Modifier
@@ -153,7 +162,6 @@ fun ScanScreen() {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // Mini LED indicator
                 Box(
                     modifier = Modifier
                         .size(8.dp)
@@ -205,7 +213,6 @@ fun ScanScreen() {
                 Log.i("ScanScreen", "Capture triggered (Phase 2.1.2 — Mode: ${if (multiLensMode) "multi-lens" else "burst"})")
 
                 captureScope.launch {
-                    // Create new session directory & meta file for this scan trigger
                     orchestrator.startNewSession(sessionFrameStore)
 
                     val filesOrMap: Any = if (multiLensMode) {
@@ -256,7 +263,6 @@ fun ScanScreen() {
                 .padding(bottom = 48.dp)
         )
 
-        // Progress bar (Phase 2.1.1 diagnostic, alt-orta)
         when (val p = progressState) {
             is MultiLensCaptureOrchestrator.CaptureProgress.FrameStarted ->
                 LinearProgressIndicator(
@@ -282,10 +288,9 @@ fun ScanScreen() {
                         .padding(bottom = 124.dp)
                         .fillMaxWidth(0.6f)
                 )
-            else -> { /* idle / done: hide bar */ }
+            else -> {}
         }
 
-        // Optional small status text under the shutter (Phase 2.1.0 diagnostic)
         lastCaptureLog?.let { log ->
             Text(
                 text = log,
@@ -302,25 +307,56 @@ fun ScanScreen() {
     if (showMyScans) {
         MyScansScreen(
             store = sessionFrameStore,
-            onClose = { showMyScans = false }
+            onClose = { showMyScans = false },
+            onOpen = { session ->
+                showMyScans = false
+                openedSession = session
+            }
         )
     }
 
-    // ── Camera Bind (previewView hazır olunca) ──────────────────────
-    // LaunchedEffect key = previewView:
-    //   • null → erken return (henüz host yaratılmadı)
-    //   • non-null → initialize + bind → camera CANLI
-    //   • composition recreate (rotation) → yeni PreviewView → re-bind
+    // [Phase 2.4] — Detail Screen Overlay
+    openedSession?.let { session ->
+        ScanDetailScreen(
+            session = session,
+            onClose = { openedSession = null },
+            onShareZip = { s -> triggerZipShare(s) }
+        )
+    }
+
+    // [Phase 2.6] — ZIP Share Progress dialogs
+    when (val s = zipShareState) {
+        is ZipShareState.Zipping -> AlertDialog(
+            onDismissRequest = {},
+            confirmButton = {},
+            title = { Text("ZIP Hazırlanıyor") },
+            text = {
+                Column {
+                    Text("${s.total} kare paketleniyor…")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+            }
+        )
+        is ZipShareState.Failed -> AlertDialog(
+            onDismissRequest = { zipShareState = ZipShareState.Idle },
+            confirmButton = {
+                TextButton(onClick = { zipShareState = ZipShareState.Idle }) {
+                    Text("Tamam")
+                }
+            },
+            title = { Text("Paylaşım başarısız") },
+            text = { Text(s.message) }
+        )
+        else -> {}
+    }
+
     LaunchedEffect(previewView) {
         val pv = previewView ?: return@LaunchedEffect
         cameraController.initialize()
         cameraController.bindPreview(pv)
     }
 
-    // ── Camera Unbind (composition dispose) ─────────────────────────
-    // Activity destroy / navigation away → onDispose → kamera serbest.
-    // BindToLifecycle onStop'ta session'ı duraklatır ama resource tam
-    // serbest olması için unbind() şarttır (diğer app'ler kamera kullanabilsin).
     DisposableEffect(Unit) {
         onDispose { cameraController.unbind() }
     }
