@@ -5,12 +5,14 @@ import android.content.Context
 import android.os.Debug
 import android.util.Log
 import com.magicv3.scanner3d.domain.model.RamMetrics
+import com.magicv3.scanner3d.domain.model.CpuMetrics
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import java.io.File
+
 
 /**
  * Sistem donanım metriklerini okuyan infra katmanı servisi.
@@ -44,10 +46,21 @@ import java.io.File
 class SystemMonitor(
     context: Context
 ) {
+    /** 5-tuple — Kotlin stdlib'de yok, private data class. */
+    private data class Quintuple<A, B, C, D, E>(
+        val first: A,
+        val second: B,
+        val third: C,
+        val fourth: D,
+        val fifth: E
+    )
+
     companion object {
         private const val TAG = "SystemMonitor"
         private const val DEFAULT_INTERVAL_MS = 1000L
         private const val PROC_MEMINFO_PATH = "/proc/meminfo"
+        private const val PROC_STAT_PATH = "/proc/stat"
+        private const val PROC_SELF_STAT_PATH = "/proc/self/stat"
     }
 
     // Application context — SystemMonitor uzun ömürlü olabilir
@@ -182,5 +195,285 @@ class SystemMonitor(
      */
     private fun parseMeminfoKb(line: String): Long {
         return Regex("(\\d+)").find(line)?.value?.toLongOrNull() ?: 0L
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // CPU MONITORING — Phase 1.5
+    // ════════════════════════════════════════════════════════════════
+
+    /**
+     * CPU metriklerini periyodik yayınlayan cold flow — Delta tabanlı.
+     *
+     * Çalışma prensibi:
+     *  1. İlk okuma → previous snapshot sakla → CpuMetrics.EMPTY emit
+     *  2. Sonraki her okuma → current snapshot → delta hesap → CpuMetrics emit
+     *
+     * Delta yoksa (ilk okuma) 0 döner — kullanıcı ilk saniye HUD'da 0%
+     * görür, 2. saniye 1 sn sonra gerçek değer gelir. Bu beklenen davranış.
+     *
+     * @param intervalMs Okuma sıklığı (default 1000ms — RAM ile aynı)
+     * @return Cold Flow<CpuMetrics>
+     */
+    fun monitorCpu(intervalMs: Long = DEFAULT_INTERVAL_MS): Flow<CpuMetrics> = flow {
+        // İlk snapshot'ı al ama emit etme — delta referansı olarak sakla
+        var previous = readCpuSnapshot()
+
+        // İlk emit: delta yok, EMPTY dön (HUD ilk frame'de 0% gösterir)
+        emit(CpuMetrics.EMPTY.copy(
+            coreCount = previous.coreCount,
+            uptimeJiffies = previous.uptimeJiffies,
+            timestamp = System.currentTimeMillis()
+        ))
+
+        while (true) {
+            delay(intervalMs)
+            val current = readCpuSnapshot()
+            val metrics = computeCpuDelta(previous, current)
+            emit(metrics)
+            previous = current
+        }
+    }.flowOn(Dispatchers.IO)
+
+    /**
+     * Tek seferlik CPU okuması — delta hesap için iki nokta gerekir.
+     * Bu fonksiyonla arka arkaya iki kez çağırıp delta hesaplanabilir.
+     * Standalone kullanım için değil, yardımcı metod.
+     */
+    suspend fun snapshotCpu(): CpuMetrics {
+        val s1 = readCpuSnapshot()
+        delay(DEFAULT_INTERVAL_MS)
+        val s2 = readCpuSnapshot()
+        return computeCpuDelta(s1, s2)
+    }
+
+    // ── CPU Snapshot Yapısı (private inner) ─────────────────────────
+
+    /**
+     * Bir /proc/stat okuma anlık görüntüsü — delta için saklanır.
+     *
+     * @param totalJiffies Tüm çekirdeklerin toplam jiffiesi (idle dahil)
+     * @param totalIdleJiffies Tüm çekirdeklerin idle jiffiesi (idle+iowait)
+     * @param perCoreTotal List<Long> — her çekirdeğin toplam jiffiesi
+     * @param perCoreIdle  List<Long> — her çekirdeğin idle jiffiesi
+     * @param appCpuJiffies /proc/self/stat → utime + stime
+     * @param coreCount Çekirdek sayısı
+     * @param uptimeJiffies /proc/stat ilk satır "btime" yok; cpu aggregate
+     *                      toplamı uptime proxy'si olarak kullanılır
+     */
+    private data class CpuSnapshot(
+        val totalJiffies: Long,
+        val totalIdleJiffies: Long,
+        val perCoreTotal: List<Long>,
+        val perCoreIdle: List<Long>,
+        val appCpuJiffies: Long,
+        val coreCount: Int,
+        val uptimeJiffies: Long
+    )
+
+    /**
+     * /proc/stat + /proc/self/stat'ı okuyup snapshot oluşturur.
+     * Bu metod IO dispatcher'da çağrılır (flowOn(IO) garantisi).
+     */
+    private fun readCpuSnapshot(): CpuSnapshot {
+        val (totalJiffies, totalIdleJiffies, perCoreTotal, perCoreIdle, coreCount) =
+            readProcStat()
+
+        val appCpuJiffies = readProcSelfStat()
+
+        return CpuSnapshot(
+            totalJiffies = totalJiffies,
+            totalIdleJiffies = totalIdleJiffies,
+            perCoreTotal = perCoreTotal,
+            perCoreIdle = perCoreIdle,
+            appCpuJiffies = appCpuJiffies,
+            coreCount = coreCount,
+            uptimeJiffies = totalJiffies
+        )
+    }
+
+    /**
+     * /proc/stat dosyasını parse eder.
+     *
+     * Format (SD 8 Gen 3 — 8 çekirdek):
+     *   cpu  123456 789 23456 987654 ...        ← aggregate (space)
+     *   cpu0 12345 67 2345 98765 ...            ← per-core 0
+     *   cpu1 ...
+     *   ...
+     *   cpu7 ...
+     *   intr 1234567890 ...
+     *   ctxt ...
+     *   btime 1700000000
+     *   ...
+     *
+     * Heap allocation minimize için useLines{} kullanırız.
+     *
+     * @return (aggregateTotal, aggregateIdle, perCoreTotal[], perCoreIdle[], coreCount)
+     */
+    private fun readProcStat(): Quintuple<Long, Long, List<Long>, List<Long>, Int> {
+        return try {
+            val statFile = File(PROC_STAT_PATH)
+            if (!statFile.exists() || !statFile.canRead()) {
+                Log.w(TAG, "/proc/stat not accessible — CPU metrics empty")
+                return Quintuple(0L, 0L, emptyList(), emptyList(), 0)
+            }
+
+            var aggregateTotal = 0L
+            var aggregateIdle = 0L
+            val coresTotal = mutableListOf<Long>()
+            val coresIdle = mutableListOf<Long>()
+
+            statFile.useLines { lines ->
+                lines.forEach lineLoop@{ line ->
+                    // Aggregate satır (boşluk sonrası "cpu"): "cpu  12345 678 ..."
+                    if (line.startsWith("cpu ")) {
+                        val parts = line.trim().split(Regex("\\s+"))
+                        // parts[0]="cpu", parts[1..]=user nice system idle iowait irq softirq steal
+                        if (parts.size >= 5) {
+                            val user = parts[1].toLongOrNull() ?: 0L
+                            val nice = parts[2].toLongOrNull() ?: 0L
+                            val system = parts[3].toLongOrNull() ?: 0L
+                            val idle = parts[4].toLongOrNull() ?: 0L
+                            val iowait = if (parts.size > 5) parts[5].toLongOrNull() ?: 0L else 0L
+                            val irq = if (parts.size > 6) parts[6].toLongOrNull() ?: 0L else 0L
+                            val softirq = if (parts.size > 7) parts[7].toLongOrNull() ?: 0L else 0L
+                            val steal = if (parts.size > 8) parts[8].toLongOrNull() ?: 0L else 0L
+
+                            aggregateTotal = user + nice + system + idle + iowait + irq + softirq + steal
+                            aggregateIdle = idle + iowait
+                        }
+                    }
+                    // Per-core satırlar: "cpu0 123 ...", "cpu1 234 ..."
+                    else if (line.startsWith("cpu") && line.length > 3 && line[3].isDigit()) {
+                        val parts = line.trim().split(Regex("\\s+"))
+                        if (parts.size >= 5) {
+                            val user = parts[1].toLongOrNull() ?: 0L
+                            val nice = parts[2].toLongOrNull() ?: 0L
+                            val system = parts[3].toLongOrNull() ?: 0L
+                            val idle = parts[4].toLongOrNull() ?: 0L
+                            val iowait = if (parts.size > 5) parts[5].toLongOrNull() ?: 0L else 0L
+                            val irq = if (parts.size > 6) parts[6].toLongOrNull() ?: 0L else 0L
+                            val softirq = if (parts.size > 7) parts[7].toLongOrNull() ?: 0L else 0L
+                            val steal = if (parts.size > 8) parts[8].toLongOrNull() ?: 0L else 0L
+
+                            coresTotal.add(user + nice + system + idle + iowait + irq + softirq + steal)
+                            coresIdle.add(idle + iowait)
+                        }
+                    }
+                }
+            }
+
+            Quintuple(
+                aggregateTotal,
+                aggregateIdle,
+                coresTotal,
+                coresIdle,
+                coresTotal.size
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "/proc/stat read failed — CPU metrics zero", e)
+            Quintuple(0L, 0L, emptyList(), emptyList(), 0)
+        }
+    }
+
+    /**
+     * /proc/self/stat'ın 14. (utime) ve 15. (stime) alanlarını okur.
+     *
+     * Format (man proc):
+     *   pid (comm) state ppid pgrp session tty_nr tpgid flags ...
+     *   minflt cminflt majflt cmajflt
+     *   utime stime cutime cstime            ← sırasıyla 14, 15, 16, 17
+     *   priority nice ...
+     *
+     * "(comm)" parantez içinde boşluk içerebilir → split naive patlar.
+     * Çözüm: son ")" ile utime arasındaki kalanı parse et.
+     *
+     * @return utime + stime (jiffies)
+     */
+    private fun readProcSelfStat(): Long {
+        return try {
+            val statFile = File(PROC_SELF_STAT_PATH)
+            if (!statFile.exists() || !statFile.canRead()) return 0L
+
+            // Tüm satırı tek seferde oku — küçük dosya (~1KB)
+            val line = statFile.bufferedReader().use { it.readLine() } ?: return 0L
+
+            // comm field'ı "(...)" içinde, boşluk içerebilir.
+            // Son ")" sonrası kalan kelimelerin içinde 13. ve 14. alanlar
+            // utime ve stime'dir (1-indexed man proc'a göre).
+            val lastParen = line.lastIndexOf(')')
+            if (lastParen < 0) return 0L
+
+            // fields[0] = "state"  (1-indexed 3. alan = state  → array idx 0)
+            // fields[1] = "ppid"   (4. alan → idx 1)
+            // ...
+            // utime = 14. alan → idx 11  (14 - 3 = 11)
+            // stime = 15. alan → idx 12
+            val fields = line.substring(lastParen + 1).trim().split(Regex("\\s+"))
+            if (fields.size <= 12) return 0L
+
+            val utime = fields[11].toLongOrNull() ?: 0L
+            val stime = fields[12].toLongOrNull() ?: 0L
+            utime + stime
+        } catch (e: Exception) {
+            Log.w(TAG, "/proc/self/stat read failed — app CPU time zero", e)
+            0L
+        }
+    }
+
+    /**
+     * İki snapshot arasındaki delta'yı CpuMetrics'e çevirir.
+     *
+     * Formül:
+     *   delta_total = curr.totalJiffies - prev.totalJiffies
+     *   delta_idle  = curr.idleJiffies  - prev.idleJiffies
+     *   usage_%     = ((delta_total - delta_idle) × 100) / delta_total
+     *
+     * Per-core için aynı formül her (curr.perCore[i], prev.perCore[i]) için.
+     *
+     * App share:
+     *   delta_app = curr.appCpuJiffies - prev.appCpuJiffies
+     *   app_%     = (delta_app × 100) / delta_total
+     *   (delta_total = aggregate delta = 8 çekirdek total jiffies Δ)
+     *
+     * Edge cases:
+     *   - delta_total <= 0 → 0% (erişilemedi ya da Çok hızlı okuma)
+     *   - delta_idle > delta_total → clamp to 0% (clock skew nadir)
+     *   - Liste boyutları farklı → zip'e güvenli (shorter list ekseninde)
+     */
+    private fun computeCpuDelta(prev: CpuSnapshot, curr: CpuSnapshot): CpuMetrics {
+        // Aggregate delta
+        val deltaTotal = (curr.totalJiffies - prev.totalJiffies).coerceAtLeast(0L)
+        val deltaIdle = (curr.totalIdleJiffies - prev.totalIdleJiffies).coerceAtLeast(0L)
+
+        val totalUsagePercent = if (deltaTotal > 0) {
+            ((deltaTotal - deltaIdle) * 100L / deltaTotal).toInt().coerceIn(0, 100)
+        } else 0
+
+        // Per-core delta — listeler farklı boyutta olabilir (nadir)
+        val perCoreUsage = mutableListOf<Int>()
+        val minSize = minOf(prev.perCoreTotal.size, curr.perCoreTotal.size)
+        for (i in 0 until minSize) {
+            val dTotal = (curr.perCoreTotal[i] - prev.perCoreTotal[i]).coerceAtLeast(0L)
+            val dIdle = (curr.perCoreIdle[i] - prev.perCoreIdle[i]).coerceAtLeast(0L)
+            val pct = if (dTotal > 0) {
+                ((dTotal - dIdle) * 100L / dTotal).toInt().coerceIn(0, 100)
+            } else 0
+            perCoreUsage.add(pct)
+        }
+
+        // App CPU share — app delta / aggregate total delta
+        val deltaApp = (curr.appCpuJiffies - prev.appCpuJiffies).coerceAtLeast(0L)
+        val appUsagePercent = if (deltaTotal > 0) {
+            ((deltaApp * 100L) / deltaTotal).toInt().coerceIn(0, 100)
+        } else 0
+
+        return CpuMetrics(
+            totalUsagePercent = totalUsagePercent,
+            perCoreUsagePercents = perCoreUsage.toList(),
+            appUsagePercent = appUsagePercent,
+            coreCount = curr.coreCount,
+            uptimeJiffies = curr.uptimeJiffies,
+            timestamp = System.currentTimeMillis()
+        )
     }
 }

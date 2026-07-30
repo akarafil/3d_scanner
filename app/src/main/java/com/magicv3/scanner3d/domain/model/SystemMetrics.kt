@@ -109,3 +109,68 @@ fun formatBytes(bytes: Long): String {
     }
     return "%.1f %s".format(value, units[unitIndex])
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// CPU METRICS  (Phase 1.5)
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * Sistem CPU kullanım metrikleri — iki ardışık okuma arasındaki delta.
+ *
+ * ── Honor Magic V3 / SD 8 Gen 3 Topolojisi ──────────────────────────
+ *   Cluster 0 (Efficiency): cpu0-cpu1  Cortex-A520 @ 2.30 GHz
+ *   Cluster 1 (Performance): cpu2-cpu3 Cortex-A720 @ 3.00 GHz
+ *   Cluster 2 (Performance): cpu4-cpu5 Cortex-A720 @ 3.20 GHz
+ *   Cluster 3 (Prime)      : cpu7       Cortex-X4   @ 3.30 GHz
+ *                            (cpu6   A720 aux — cihaza göre değişken)
+ *
+ *   Toplam 8 çekirdek. Cluster-boundary'ler kernel boot parametreleri
+ *   ve qcom dtbo'ya göre sınırlar değişebilir — bu fazda cluster ayrımı
+ *   yapılmaz, sadece per-core percent List<Int> tutulur.
+ *
+ * ── Field Anlamları ────────────────────────────────────────────────
+ * @param totalUsagePercent   8 çekirdeğin aggregate kullanımı (%) 0..100
+ * @param perCoreUsagePercents Her çekirdek için ayrı yüzde — index = cpuN
+ *                              Liste boyutu cihazın çekirdek sayısı
+ *                              (8 beklenir, runtime'da doğrula)
+ * @param appUsagePercent     Bu process'in tüm CPU'lara oranı (%)
+ *                            Kamera + ISP pipeline yükünü yansıtır
+ * @param coreCount           Cihazdaki toplam çekirdek sayısı
+ * @param uptimeJiffies       İşletim sistemi boot jiffies (debug)
+ * @param timestamp           Okuma anı (System.currentTimeMillis)
+ */
+data class CpuMetrics(
+    val totalUsagePercent: Int,
+    val perCoreUsagePercents: List<Int>,
+    val appUsagePercent: Int,
+    val coreCount: Int,
+    val uptimeJiffies: Long,
+    val timestamp: Long
+) {
+    companion object {
+        /** İlk okuma (önceki snapshot yoksa) ya da hata durumunda dummy. */
+        val EMPTY = CpuMetrics(
+            totalUsagePercent = 0,
+            perCoreUsagePercents = emptyList(),
+            appUsagePercent = 0,
+            coreCount = 0,
+            uptimeJiffies = 0L,
+            timestamp = 0L
+        )
+    }
+}
+
+/**
+ * CPU yüzdesinden MetricLevel üretir — RAM'den farklı eşik:
+ *   GOOD : <50%  → HudGood (kamera + Compose yükü az)
+ *   WARN : 50-80% → HudWarn (tarama sırasında beklenen)
+ *   CRIT : >80%  → HudCrit (thermal throttle riski artıyor)
+ *
+ * RAM'den daha dar eşik çünkü CPU throttle'a RAM'den önce girer.
+ */
+fun cpuLevelFromPercent(percent: Int): MetricLevel = when {
+    percent < 50 -> MetricLevel.GOOD
+    percent < 80 -> MetricLevel.WARN
+    else -> MetricLevel.CRIT
+}
+
