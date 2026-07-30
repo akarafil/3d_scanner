@@ -14,14 +14,14 @@ import java.io.IOException
 import java.util.UUID
 
 /**
- * Phase 2.1.1 — Multi-lens capture orchestrator.
+ * Phase 2.2.1 — Multi-lens capture orchestrator.
  *
  * Wraps RawAuxCaptureSession to deliver:
  *  1. Multi-frame burst from a single lens ( autoFocus settle + N still frames )
  *  2. Lens switching: take one photo from each of [Tele, UW, Main] for rich-texture scanning
  *  3. Centralised output directory management (aux_captures) — caller-visible StateFlow
  *  4. Retry on transient onError=2 (legitimate for multi-lens warmup race)
- *  5. EXIF orientation & optical metadata stamping (Phase 2.2)
+ *  5. EXIF orientation & optical metadata stamping resolved from AuxLensCatalog (Phase 2.2.1)
  *
  * Not in scope yet:
  *  - Concurrent multi-lens sessions (Honor allows 1 open camera at a time)
@@ -44,7 +44,7 @@ class MultiLensCaptureOrchestrator(
         /** Inter-frame gap to let AE/AF re-converge (ms). */
         private const val INTER_FRAME_GAP_MS = 250L
 
-        /** Hard retry cap per frame to avoid infinite loop on persistent onError=2. */
+        /** Hard retry cap per frame to avoid infinite loop on transient onError=2. */
         private const val MAX_RETRIES_PER_FRAME = 2
     }
 
@@ -61,13 +61,19 @@ class MultiLensCaptureOrchestrator(
     val progress: StateFlow<CaptureProgress> = _progress.asStateFlow()
 
     private val exifWriter = AuxExifWriter()
-    private var lensesCatalog: List<CameraLens>? = null
+    private var auxLensMap: Map<String, CameraLens>? = null
 
-    private suspend fun getLens(lensId: String): CameraLens? {
-        if (lensesCatalog == null) {
-            lensesCatalog = runCatching { CameraLensCatalog(context).enumerateLenses() }.getOrNull()
+    private suspend fun getAuxLensMap(): Map<String, CameraLens> = withContext(Dispatchers.IO) {
+        synchronized(this@MultiLensCaptureOrchestrator) {
+            auxLensMap
+        } ?: run {
+            val candidateIds = listOf("0", "1", "2", "3", "4", "5", "8", "9")
+            val resolved = AuxLensCatalog(context).resolve(candidateIds)
+            synchronized(this@MultiLensCaptureOrchestrator) {
+                auxLensMap = resolved
+                resolved
+            }
         }
-        return lensesCatalog?.find { it.physicalId == lensId }
     }
 
     private fun readImageSize(file: File): Pair<Int, Int> {
@@ -81,7 +87,7 @@ class MultiLensCaptureOrchestrator(
     private suspend fun captureAndStamp(lensId: String, sessionId: UUID): File? {
         val raw = captureWithRetry(lensId, attempt = 0) ?: return null
         val (w, h) = runCatching { readImageSize(raw) }.getOrDefault(Pair(0, 0))
-        val lens = getLens(lensId)
+        val lens = getAuxLensMap()[lensId]
         return exifWriter.stamp(
             jpegFile = raw,
             lensId = lensId,
