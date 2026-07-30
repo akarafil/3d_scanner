@@ -174,3 +174,82 @@ fun cpuLevelFromPercent(percent: Int): MetricLevel = when {
     else -> MetricLevel.CRIT
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// THERMAL METRICS (Phase 1.6)
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * Termal zone tipleri — /sys/class/thermal/thermal_zone* /type
+ * dosyasından okunan string'e göre map.
+ */
+enum class ThermalZoneType {
+    CPU_CORE,       // "cpu-*" veya "cpu-thermal"
+    GPU,            // "gpu-*"
+    ISP,            // "isp-*" veya "camera-*"
+    NPU,            // "npu-*" veya "apu-*" (Honor "apu" kullanır)
+    SKIN,           // "skin-*" veya "quiet-therm"
+    BATTERY,        // "battery-*"
+    DDR,            // "ddr-*" veya "mem-*"
+    WLAN,           // "wlan-*" veya "wifi-*"
+    MODEM,          // "modem-*"
+    UNKNOWN         // eşleşmeyen zone'lar
+}
+
+/**
+ * Tek bir termal zone ölçümü.
+ */
+data class ThermalZoneReading(
+    val zoneId: Int,
+    val zoneTypeRaw: String,
+    val zoneType: ThermalZoneType,
+    val tempCelsius: Float,
+    val timestamp: Long
+)
+
+/**
+ * Sistem termal metrikleri — tüm önemli termal zonelardan
+ * gelen verinin özetlenmiş hali.
+ */
+data class ThermalMetrics(
+    val socTempC: Float,
+    val skinTempC: Float,
+    val batteryTempC: Float,
+    val gpuTempC: Float,
+    val ispTempC: Float,
+    val npuTempC: Float = 0f,
+    val cpuZoneTempsC: List<Float>,
+    val allZoneReadings: List<ThermalZoneReading>,
+    val throttlingLevel: Int,
+    val throttleWarning: Boolean,
+    val timestamp: Long
+) {
+    companion object {
+        val EMPTY = ThermalMetrics(
+            socTempC = 0f,
+            skinTempC = 0f,
+            batteryTempC = 0f,
+            gpuTempC = 0f,
+            ispTempC = 0f,
+            npuTempC = 0f,
+            cpuZoneTempsC = emptyList(),
+            allZoneReadings = emptyList(),
+            throttlingLevel = 0,
+            throttleWarning = false,
+            timestamp = 0L
+        )
+    }
+}
+
+/**
+ * Celsius sıcaklıktan MetricLevel üretir:
+ *   GOOD : <60°C → kamera/ISP tam hızda, throttle yok
+ *   WARN : 60-80°C → bazı cluster'lar throttle olabilir
+ *   CRIT : >80°C → mutlak throttle, frame rate düşebilir
+ */
+fun thermalLevelFromCelsius(tempC: Float): MetricLevel = when {
+    tempC < 60f -> MetricLevel.GOOD
+    tempC < 80f -> MetricLevel.WARN
+    else -> MetricLevel.CRIT
+}
+
+

@@ -6,6 +6,9 @@ import android.os.Debug
 import android.util.Log
 import com.magicv3.scanner3d.domain.model.RamMetrics
 import com.magicv3.scanner3d.domain.model.CpuMetrics
+import com.magicv3.scanner3d.domain.model.ThermalMetrics
+import com.magicv3.scanner3d.domain.model.ThermalZoneReading
+import com.magicv3.scanner3d.domain.model.ThermalZoneType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -61,6 +64,8 @@ class SystemMonitor(
         private const val PROC_MEMINFO_PATH = "/proc/meminfo"
         private const val PROC_STAT_PATH = "/proc/stat"
         private const val PROC_SELF_STAT_PATH = "/proc/self/stat"
+        private const val THERMAL_BASE_PATH = "/sys/class/thermal"
+        private const val THERMAL_INTERVAL_MS = 2000L
     }
 
     // Application context — SystemMonitor uzun ömürlü olabilir
@@ -473,6 +478,171 @@ class SystemMonitor(
             appUsagePercent = appUsagePercent,
             coreCount = curr.coreCount,
             uptimeJiffies = curr.uptimeJiffies,
+            timestamp = System.currentTimeMillis()
+        )
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // THERMAL MONITORING — Phase 1.6
+    // ════════════════════════════════════════════════════════════════
+
+    /**
+     * Termal metrikleri periyodik yayınlayan cold flow.
+     *
+     * Çekirdek yaklaşım: /sys/class/thermal/thermal_zone* dizinini
+     * enumerate et → her zone için (type, temp) oku → ThermalZoneReading
+     * üret → toplu ThermalMetrics'e map et.
+     *
+     * @param intervalMs Okuma sıklığı. Default 2000ms — thermaller
+     *                  yavaş değişir, RAM/CPU'dan daha az. Batarya
+     *                  tasarrufu + log noise azaltır.
+     * @return Cold Flow<ThermalMetrics>
+     */
+    fun monitorThermal(intervalMs: Long = THERMAL_INTERVAL_MS): Flow<ThermalMetrics> = flow {
+        while (true) {
+            val zones = readThermalSnapshot()
+            emit(computeThermalMetrics(zones))
+            delay(intervalMs)
+        }
+    }.flowOn(Dispatchers.IO)
+
+    /**
+     * Tek seferlik termal snapshot — debug/test için.
+     */
+    suspend fun snapshotThermal(): ThermalMetrics {
+        val zones = readThermalSnapshot()
+        return computeThermalMetrics(zones)
+    }
+
+    /**
+     * /sys/class/thermal/thermal_zone* dizinini enumerate eder.
+     * Her zone için (type, temp) okur.
+     *
+     * @return ThermalZoneReading listesi
+     */
+    private fun readThermalSnapshot(): List<ThermalZoneReading> {
+        return try {
+            val thermalDir = File(THERMAL_BASE_PATH)
+            if (!thermalDir.exists() || !thermalDir.canRead()) {
+                Log.w(TAG, "/sys/class/thermal not accessible — thermal metrics empty")
+                return emptyList()
+            }
+
+            // thermal_zone0, thermal_zone1, ... N
+            val zoneDirs = thermalDir.listFiles { file ->
+                file.isDirectory && file.name.startsWith("thermal_zone")
+            }?.sortedBy { dir ->
+                val num = dir.name.removePrefix("thermal_zone").toIntOrNull() ?: 0
+                num
+            } ?: emptyList()
+
+            val readings = mutableListOf<ThermalZoneReading>()
+            for (zoneDir in zoneDirs) {
+                val zoneId = zoneDir.name.removePrefix("thermal_zone").toIntOrNull() ?: -1
+                if (zoneId < 0) continue
+
+                val typeFile = File(zoneDir, "type")
+                val tempFile = File(zoneDir, "temp")
+                if (!typeFile.exists() || !tempFile.exists()) continue
+
+                val zoneTypeRaw = typeFile.bufferedReader().use { it.readLine() }?.trim()
+                    ?: continue
+                val tempStr = tempFile.bufferedReader().use { it.readLine() }?.trim()
+                    ?: continue
+
+                val tempMilliC = tempStr.toLongOrNull() ?: continue
+                val tempC = tempMilliC / 1000.0f
+
+                readings.add(
+                    ThermalZoneReading(
+                        zoneId = zoneId,
+                        zoneTypeRaw = zoneTypeRaw,
+                        zoneType = classifyThermalZone(zoneTypeRaw),
+                        tempCelsius = tempC,
+                        timestamp = System.currentTimeMillis()
+                    )
+                )
+            }
+
+            readings
+        } catch (e: Exception) {
+            Log.w(TAG, "readThermalSnapshot failed", e)
+            emptyList()
+        }
+    }
+
+    /**
+     * Ham zone type string'ini ThermalZoneType enum'ına mapler.
+     *
+     * SD 8 Gen 3 / Magic OS tipik zone type'ları:
+     *   "cpu-0-0-usr"    → CPU_CORE
+     *   "cpu-1-0-usr"    → CPU_CORE
+     *   "gpu-1-0-usr"    → GPU
+     *   "quiet-therm"    → SKIN (Qualcomm "quiet-therm" = skin proxy)
+     *   "skin-therm"     → SKIN
+     *   "battery"        → BATTERY
+     *   "apu-therm"      → NPU (Honor "apu" kullanır)
+     *   "npu-therm"      → NPU
+     *   "ddr-therm"      → DDR
+     *   "mem-therm"      → DDR
+     *   "wlan-therm"     → WLAN
+     *   "modem-therm"    → MODEM
+     *
+     * Substring match — case-sensitive, lowercase normalize.
+     */
+    private fun classifyThermalZone(typeRaw: String): ThermalZoneType {
+        val t = typeRaw.lowercase()
+        return when {
+            t.startsWith("cpu") || t.contains("cpu") -> ThermalZoneType.CPU_CORE
+            t.startsWith("gpu") || t.contains("gpu") -> ThermalZoneType.GPU
+            t.startsWith("isp") || t.contains("isp") || t.startsWith("camera") -> ThermalZoneType.ISP
+            t.startsWith("npu") || t.startsWith("apu") || t.contains("npu") || t.contains("apu") -> ThermalZoneType.NPU
+            t.startsWith("skin") || t.startsWith("quiet") || t.contains("skin") || t.contains("quiet") -> ThermalZoneType.SKIN
+            t.startsWith("battery") || t.contains("battery") -> ThermalZoneType.BATTERY
+            t.startsWith("ddr") || t.startsWith("mem") || t.contains("ddr") || t.contains("mem") -> ThermalZoneType.DDR
+            t.startsWith("wlan") || t.startsWith("wifi") || t.contains("wlan") || t.contains("wifi") -> ThermalZoneType.WLAN
+            t.startsWith("modem") || t.contains("modem") -> ThermalZoneType.MODEM
+            else -> ThermalZoneType.UNKNOWN
+        }
+    }
+
+    /**
+     * Ham zone okumalarını birleştirip ThermalMetrics üretir.
+     */
+    private fun computeThermalMetrics(zones: List<ThermalZoneReading>): ThermalMetrics {
+        val cpuCores = zones.filter { it.zoneType == ThermalZoneType.CPU_CORE }
+        val gpuZones = zones.filter { it.zoneType == ThermalZoneType.GPU }
+        val skinZones = zones.filter { it.zoneType == ThermalZoneType.SKIN }
+        val ispZones = zones.filter { it.zoneType == ThermalZoneType.ISP }
+        val npuZones = zones.filter { it.zoneType == ThermalZoneType.NPU }
+        val batteryZones = zones.filter { it.zoneType == ThermalZoneType.BATTERY }
+
+        val socTempC = cpuCores.maxOfOrNull { it.tempCelsius } ?: 0f
+        val skinTempC = skinZones.maxOfOrNull { it.tempCelsius } ?: 0f
+        val gpuTempC = gpuZones.maxOfOrNull { it.tempCelsius } ?: 0f
+        val ispTempC = ispZones.maxOfOrNull { it.tempCelsius } ?: 0f
+        val npuTempC = npuZones.maxOfOrNull { it.tempCelsius } ?: 0f
+        val batteryTempC = batteryZones.maxOfOrNull { it.tempCelsius } ?: 0f
+        val cpuZoneTemps = cpuCores.map { it.tempCelsius }
+
+        val throttlingLevel = when {
+            socTempC >= 90f -> 2
+            socTempC >= 80f -> 1
+            else -> 0
+        }
+        val throttleWarning = socTempC >= 75f
+
+        return ThermalMetrics(
+            socTempC = socTempC,
+            skinTempC = skinTempC,
+            batteryTempC = batteryTempC,
+            gpuTempC = gpuTempC,
+            ispTempC = ispTempC,
+            npuTempC = npuTempC,
+            cpuZoneTempsC = cpuZoneTemps,
+            allZoneReadings = zones,
+            throttlingLevel = throttlingLevel,
+            throttleWarning = throttleWarning,
             timestamp = System.currentTimeMillis()
         )
     }
