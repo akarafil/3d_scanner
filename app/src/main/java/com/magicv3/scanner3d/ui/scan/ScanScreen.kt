@@ -20,6 +20,7 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import com.magicv3.scanner3d.infra.camera.CameraController
 import com.magicv3.scanner3d.infra.camera.CameraLensCatalog
+import com.magicv3.scanner3d.infra.camera.AuxProbe
 import com.magicv3.scanner3d.ui.capture.CaptureButton
 import com.magicv3.scanner3d.ui.capture.CaptureState
 import com.magicv3.scanner3d.ui.hud.SystemHud
@@ -68,15 +69,16 @@ fun ScanScreen() {
     var captureState by remember { mutableStateOf(CaptureState.IDLE) }
     val captureScope = rememberCoroutineScope()
 
-    // ===== Faz 2.0 — Geçici lens catalog dump (Faz 2.4'te kaldırılacak) =====
+    // ===== Faz 2.0 + 2.0.5 — Geçici catalog dump + aux probe =====
     LaunchedEffect(Unit) {
         runCatching {
             CameraLensCatalog(context).enumerateLenses()
+            AuxProbe(context).probe()
         }.onFailure {
-            Log.e("ScanScreen", "CameraLensCatalog enumeration failed", it)
+            Log.e("ScanScreen", "Camera enumeration/probe failed", it)
         }
     }
-    // ===== Faz 2.0 dump sonu =====
+    // ===== Geçici dump sonu (Faz 2.4'te kaldırılacak) =====
 
     Box(modifier = Modifier.fillMaxSize()) {
         CameraPreviewSurface(
