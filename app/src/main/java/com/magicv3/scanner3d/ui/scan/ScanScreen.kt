@@ -5,6 +5,8 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -21,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import com.magicv3.scanner3d.infra.camera.CameraController
 import com.magicv3.scanner3d.infra.camera.CameraLensCatalog
 import com.magicv3.scanner3d.infra.camera.AuxProbe
+import com.magicv3.scanner3d.infra.camera.RawAuxCaptureSession
 import com.magicv3.scanner3d.ui.capture.CaptureButton
 import com.magicv3.scanner3d.ui.capture.CaptureState
 import com.magicv3.scanner3d.ui.hud.SystemHud
@@ -68,6 +71,8 @@ fun ScanScreen() {
     // [Phase 1.8] — Capture state + coroutine scope
     var captureState by remember { mutableStateOf(CaptureState.IDLE) }
     val captureScope = rememberCoroutineScope()
+    var lastCaptureLog by remember { mutableStateOf<String?>(null) }
+    var triggerCounter by remember { mutableStateOf(0) }
 
     // ===== Faz 2.0 + 2.0.5 — Geçici catalog dump + aux probe =====
     LaunchedEffect(Unit) {
@@ -102,14 +107,29 @@ fun ScanScreen() {
         CaptureButton(
             state = captureState,
             onClick = {
-                // Phase 1.8 placeholder — gerçek pipeline Phase 2'de bağlanır
-                Log.i("Capture", "Capture triggered (placeholder — Phase 2 wire pipeline)")
+                if (captureState != CaptureState.IDLE) return@CaptureButton
+
+                triggerCounter++
+                captureState = CaptureState.CAPTURING
+                lastCaptureLog = "Tele (id=4) capture triggered…"
+                Log.i("ScanScreen", "Capture triggered (Phase 2.1.0 — Tele bypass)")
+
                 captureScope.launch {
-                    captureState = CaptureState.CAPTURING
-                    // TODO Phase 2: ImageCapture takePhoto / scan sweep trigger
-                    delay(1500) // simülasyon — gerçek capture süresini temsil eder
-                    captureState = CaptureState.DONE
-                    delay(400)  // kısa yeşil feedback
+                    val result = RawAuxCaptureSession(context).captureSingleFrame()
+                    result
+                        .onSuccess { file ->
+                            captureState = CaptureState.DONE
+                            lastCaptureLog = "✅ Tele frame saved: ${file.name} (${file.length()} B)"
+                            Log.i("ScanScreen", "Tele JPEG: ${file.absolutePath}")
+                        }
+                        .onFailure { err ->
+                            captureState = CaptureState.ERROR
+                            lastCaptureLog = "❌ Tele capture failed: ${err.message}"
+                            Log.e("ScanScreen", "Tele capture failed", err)
+                        }
+
+                    // Auto-return to IDLE for next capture
+                    delay(if (captureState == CaptureState.DONE) 400 else 1500)
                     captureState = CaptureState.IDLE
                 }
             },
@@ -117,6 +137,18 @@ fun ScanScreen() {
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 48.dp)
         )
+
+        // Optional small status text under the shutter (Phase 2.1.0 diagnostic)
+        lastCaptureLog?.let { log ->
+            Text(
+                text = log,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 132.dp)
+            )
+        }
     }
 
     // ── Camera Bind (previewView hazır olunca) ──────────────────────
