@@ -3,6 +3,8 @@ package com.magicv3.scanner3d.infra.storage
 import android.content.Context
 import com.magicv3.scanner3d.domain.model.ScanFrame
 import com.magicv3.scanner3d.domain.model.ScanSession
+import com.magicv3.scanner3d.infra.ingestion.ExifValidator
+import com.magicv3.scanner3d.infra.ingestion.ManifestGenerator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -28,6 +30,9 @@ import java.util.UUID
 class SessionFrameStore(private val context: Context) {
 
     private val rootDir: File = File(context.filesDir, "scan_projects").apply { mkdirs() }
+
+    private val manifestGenerator = ManifestGenerator(context)
+    private val exifValidator = ExifValidator()
 
     private val _sessions = MutableStateFlow<List<ScanSession>>(emptyList())
     val sessions: StateFlow<List<ScanSession>> = _sessions.asStateFlow()
@@ -132,6 +137,19 @@ class SessionFrameStore(private val context: Context) {
         writeMeta(updated)
         android.util.Log.i(TAG,
             "Appended frame #${seqStr} to ${session.projectName}: $targetName (${frame.bytes} B)")
+
+        // [Phase 3.0] Otomatik Manifest üretimi ve validation check
+        runCatching {
+            val validation = exifValidator.validateFrames(updated.frames)
+            if (validation.isValid) {
+                manifestGenerator.generateManifest(updated)
+            } else {
+                android.util.Log.w(TAG, "EXIF Validation Warning: ${validation.issues.size} sorun tespit edildi.")
+            }
+        }.onFailure { e ->
+            android.util.Log.e(TAG, "Failed to generate manifest or validate EXIF", e)
+        }
+
         refresh()
         updated
     }
