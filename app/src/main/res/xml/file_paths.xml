@@ -2,5 +2,7 @@
 <paths>
     <!-- Phase 2.6: Scan projelerini (cache'de üretilen ZIP ve frame dosyaları) paylaşmak için -->
     <cache-path name="shared_zips" path="shared_zips/" />
+    <!-- Phase 3.1: AlgorDroid MNP paket paylaşımı için -->
+    <cache-path name="shared_mnp" path="shared_mnp/" />
     <files-path name="scan_projects" path="scan_projects/" />
 </paths>
