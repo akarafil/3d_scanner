@@ -29,12 +29,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import com.magicv3.scanner3d.domain.model.ScanSession
+import com.magicv3.scanner3d.domain.model.ScanStatus
 import com.magicv3.scanner3d.infra.permission.CameraPermissionState
 import com.magicv3.scanner3d.infra.permission.rememberCameraPermissionState
+import com.magicv3.scanner3d.infra.ingestion.IngestionQueue
 import com.magicv3.scanner3d.infra.storage.SessionFrameStore
+import com.magicv3.scanner3d.infra.storage.ZipExporter
 import com.magicv3.scanner3d.ui.scan.HomeScreen
 import com.magicv3.scanner3d.ui.scan.MyScansScreen
+import com.magicv3.scanner3d.ui.scan.ScanDetailScreen
 import com.magicv3.scanner3d.ui.scan.ScanScreen
 import com.magicv3.scanner3d.ui.theme.MagicScannerTheme
 
@@ -59,6 +65,7 @@ sealed interface Screen {
     data object Home : Screen
     data object MyScans : Screen
     data class Scan(val session: ScanSession) : Screen
+    data class ScanDetail(val session: ScanSession) : Screen
 }
 
 /**
@@ -77,6 +84,8 @@ fun MagicScannerApp() {
 
         CameraPermissionState.GRANTED -> {
             var currentScreen by remember { mutableStateOf<Screen>(Screen.Home) }
+            val scope = rememberCoroutineScope()
+            val ingestionQueue = remember { IngestionQueue.getInstance(context) }
 
             when (val scr = currentScreen) {
                 is Screen.Home -> HomeScreen(
@@ -87,12 +96,35 @@ fun MagicScannerApp() {
                 is Screen.MyScans -> MyScansScreen(
                     store = store,
                     onClose = { currentScreen = Screen.Home },
-                    onOpen = { session -> currentScreen = Screen.Scan(session) }
+                    onOpen = { session -> currentScreen = Screen.ScanDetail(session) }
                 )
                 is Screen.Scan -> ScanScreen(
                     activeSession = scr.session,
                     sessionFrameStore = store,
                     onBack = { currentScreen = Screen.Home }
+                )
+                is Screen.ScanDetail -> ScanDetailScreen(
+                    session = scr.session,
+                    onClose = { currentScreen = Screen.MyScans },
+                    onShareZip = { session ->
+                        scope.launch {
+                            runCatching {
+                                val zipExporter = ZipExporter(context)
+                                val result = zipExporter.export(session)
+                                zipExporter.launchShareSheet(result, session.projectName)
+                            }
+                        }
+                    },
+                    onResumeCapture = {
+                        currentScreen = Screen.Scan(scr.session)
+                    },
+                    onStart3DRender = {
+                        scope.launch {
+                            store.updateStatus(scr.session.sessionId, ScanStatus.RENDERING)
+                            ingestionQueue.enqueue(scr.session)
+                            currentScreen = Screen.MyScans
+                        }
+                    }
                 )
             }
         }

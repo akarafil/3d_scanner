@@ -40,6 +40,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.magicv3.scanner3d.domain.model.ScanFrame
 import com.magicv3.scanner3d.domain.model.ScanSession
+import com.magicv3.scanner3d.domain.model.ScanStatus
 import com.magicv3.scanner3d.infra.ingestion.IngestionQueue
 import com.magicv3.scanner3d.infra.ingestion.IngestionState
 import com.magicv3.scanner3d.infra.storage.MeshRepository
@@ -55,8 +56,9 @@ import com.magicv3.scanner3d.infra.storage.ZipExporter
 fun ScanDetailScreen(
     session: ScanSession,
     onClose: () -> Unit,
-    onShareZip: (ScanSession) -> Unit,   // [Phase 2.6]
-    onEnqueueIngestion: (ScanSession) -> Unit, // [Phase 3.3]
+    onShareZip: (ScanSession) -> Unit,
+    onResumeCapture: () -> Unit,
+    onStart3DRender: () -> Unit,
 ) {
     val context = LocalContext.current
     val ingestionQueue = remember { IngestionQueue.getInstance(context) }
@@ -109,13 +111,6 @@ fun ScanDetailScreen(
                             tint = MaterialTheme.colorScheme.primary
                         )
                     }
-                    IconButton(onClick = { onEnqueueIngestion(session) }) {
-                        Icon(
-                            imageVector = Icons.Default.Send,
-                            contentDescription = "AlgorDroid'e Gönder",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
@@ -139,7 +134,7 @@ fun ScanDetailScreen(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             // Önce meta kartı: 2 kolonu span'leyen header item
-            item(span = { GridItemSpan(2) }) { SessionMetaCard(session) }
+            item(span = { GridItemSpan(2) }) { SessionMetaCard(session, onResumeCapture, onStart3DRender) }
 
             // Faz 4.3 — Ingestion/Reconstruction durum HUD'ı
             val showProgress = currentSessionActive && when (ingestionState) {
@@ -170,7 +165,11 @@ fun ScanDetailScreen(
 }
 
 @Composable
-private fun SessionMetaCard(session: ScanSession) {
+private fun SessionMetaCard(
+    session: ScanSession,
+    onResumeCapture: () -> Unit,
+    onStart3DRender: () -> Unit
+) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -211,6 +210,38 @@ private fun SessionMetaCard(session: ScanSession) {
                             color = MaterialTheme.colorScheme.primary
                         )
                     }
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // 1. Çekime Devam Et Butonu
+                OutlinedButton(
+                    onClick = onResumeCapture,
+                    enabled = session.status == ScanStatus.DRAFT,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.primary
+                    )
+                ) {
+                    Text("Çekime Devam Et", style = MaterialTheme.typography.labelMedium)
+                }
+
+                // 2. 3D Render'ı Başlat (AlgorDroid)
+                Button(
+                    onClick = onStart3DRender,
+                    enabled = session.frameCount > 0 && session.status == ScanStatus.DRAFT,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary
+                    )
+                ) {
+                    Text("Render'ı Başlat", style = MaterialTheme.typography.labelMedium)
                 }
             }
         }

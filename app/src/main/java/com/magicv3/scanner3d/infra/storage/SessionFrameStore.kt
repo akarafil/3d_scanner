@@ -173,6 +173,14 @@ class SessionFrameStore(private val context: Context) {
         refresh()
     }
 
+    suspend fun updateStatus(sessionId: UUID, status: ScanStatus) = withContext(Dispatchers.IO) {
+        val folder = File(rootDir, "session_$sessionId")
+        val current = ScanSession.fromJson(folder) ?: return@withContext
+        val updated = current.copy(status = status)
+        writeMeta(updated)
+        refresh()
+    }
+
     private fun writeMeta(session: ScanSession) {
         val framesArr = JSONArray()
         session.frames.forEach { f ->

@@ -43,6 +43,7 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.magicv3.scanner3d.domain.model.ScanSession
+import com.magicv3.scanner3d.domain.model.ScanStatus
 import com.magicv3.scanner3d.infra.camera.CameraController
 import com.magicv3.scanner3d.infra.camera.CameraLensCatalog
 import com.magicv3.scanner3d.infra.camera.AuxProbe
@@ -337,7 +338,14 @@ fun ScanScreen(
             session = session,
             onClose = { openedSession = null },
             onShareZip = { s -> triggerZipShare(s) },
-            onEnqueueIngestion = { s -> ingestionQueue.enqueue(s) }
+            onResumeCapture = { openedSession = null },
+            onStart3DRender = {
+                captureScope.launch {
+                    sessionFrameStore.updateStatus(session.sessionId, ScanStatus.RENDERING)
+                    ingestionQueue.enqueue(session)
+                    openedSession = null
+                }
+            }
         )
     }
 
