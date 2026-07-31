@@ -3,6 +3,7 @@ package com.magicv3.scanner3d.infra.storage
 import android.content.Context
 import com.magicv3.scanner3d.domain.model.ScanFrame
 import com.magicv3.scanner3d.domain.model.ScanSession
+import com.magicv3.scanner3d.domain.model.ScanStatus
 import com.magicv3.scanner3d.infra.ingestion.ExifValidator
 import com.magicv3.scanner3d.infra.ingestion.ManifestGenerator
 import kotlinx.coroutines.Dispatchers
@@ -74,6 +75,7 @@ class SessionFrameStore(private val context: Context) {
                 frames = emptyList(),
                 totalBytes = 0L,
                 folder = folder,
+                status = ScanStatus.DRAFT,
             )
             writeMeta(session)
             android.util.Log.i(TAG, "Created session: $finalName (folder=$folder)")
@@ -188,6 +190,7 @@ class SessionFrameStore(private val context: Context) {
             put("projectName", session.projectName)
             put("createdAtMs", session.createdAtMs)
             put("totalBytes", session.totalBytes)
+            put("status", session.status.name)
             put("frames", framesArr)
         }
         File(session.folder, "meta.json").writeText(root.toString(2))

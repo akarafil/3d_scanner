@@ -20,13 +20,21 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.magicv3.scanner3d.domain.model.ScanSession
 import com.magicv3.scanner3d.infra.permission.CameraPermissionState
 import com.magicv3.scanner3d.infra.permission.rememberCameraPermissionState
+import com.magicv3.scanner3d.infra.storage.SessionFrameStore
+import com.magicv3.scanner3d.ui.scan.HomeScreen
+import com.magicv3.scanner3d.ui.scan.MyScansScreen
 import com.magicv3.scanner3d.ui.scan.ScanScreen
 import com.magicv3.scanner3d.ui.theme.MagicScannerTheme
 
@@ -47,26 +55,47 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+sealed interface Screen {
+    data object Home : Screen
+    data object MyScans : Screen
+    data class Scan(val session: ScanSession) : Screen
+}
+
 /**
  * Uygulama kök Composable — izin state'e göre router.
- *
- * 4 durum (CameraPermissionState):
- *   NOT_REQUESTED       → Onboarding + "Kamera İzni Ver"
- *   GRANTED             → ScanScreen (kamera preview host)  ← Phase 1.2
- *   DENIED              → "Tekrar Dene" ekranı
- *   PERMANENTLY_DENIED  → Ayarlara yönlendirme
  */
 @Composable
 fun MagicScannerApp() {
     val context = LocalContext.current
     val permission = rememberCameraPermissionState(context)
+    val store = remember { SessionFrameStore(context) }
 
     when (permission.state) {
         CameraPermissionState.NOT_REQUESTED -> PermissionRequestScreen(
             onRequest = permission.requestPermission
         )
 
-        CameraPermissionState.GRANTED -> ScanScreen()
+        CameraPermissionState.GRANTED -> {
+            var currentScreen by remember { mutableStateOf<Screen>(Screen.Home) }
+
+            when (val scr = currentScreen) {
+                is Screen.Home -> HomeScreen(
+                    store = store,
+                    onStartNewScan = { session -> currentScreen = Screen.Scan(session) },
+                    onOpenMyScans = { currentScreen = Screen.MyScans }
+                )
+                is Screen.MyScans -> MyScansScreen(
+                    store = store,
+                    onClose = { currentScreen = Screen.Home },
+                    onOpen = { session -> currentScreen = Screen.Scan(session) }
+                )
+                is Screen.Scan -> ScanScreen(
+                    activeSession = scr.session,
+                    sessionFrameStore = store,
+                    onBack = { currentScreen = Screen.Home }
+                )
+            }
+        }
 
         CameraPermissionState.DENIED -> PermissionDeniedScreen(
             onRetry = permission.requestPermission

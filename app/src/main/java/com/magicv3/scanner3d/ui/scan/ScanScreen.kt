@@ -19,7 +19,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -71,7 +71,11 @@ sealed interface ZipShareState {
  * Ana tarama ekranı — kamera preview'ın host edildiği kök layout.
  */
 @Composable
-fun ScanScreen() {
+fun ScanScreen(
+    activeSession: ScanSession,
+    sessionFrameStore: SessionFrameStore,
+    onBack: () -> Unit
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraController = remember { CameraController(context, lifecycleOwner) }
@@ -85,7 +89,6 @@ fun ScanScreen() {
 
     var multiLensMode by remember { mutableStateOf(false) }
 
-    val sessionFrameStore = remember { SessionFrameStore(context) }
     var showMyScans by remember { mutableStateOf(false) }
     
     // [Phase 2.4] openedSession state for ScanDetailScreen overlay
@@ -101,6 +104,10 @@ fun ScanScreen() {
 
     val orchestrator = remember { MultiLensCaptureOrchestrator(context, sessionFrameStore) }
     val progressState by orchestrator.progress.collectAsStateWithLifecycle()
+
+    LaunchedEffect(activeSession) {
+        orchestrator.bindSession(activeSession)
+    }
 
     // ===== Faz 2.0 + 2.0.5 — Geçici catalog dump + aux probe =====
     LaunchedEffect(Unit) {
@@ -184,9 +191,9 @@ fun ScanScreen() {
             }
         }
 
-        // [Phase 2.3] — Taramalarım (My Scans) Folder Button (TopEnd)
+        // [Faz 1] — Geri Dönüş Butonu (TopEnd)
         IconButton(
-            onClick = { showMyScans = true },
+            onClick = onBack,
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .padding(top = 24.dp, end = 24.dp)
@@ -201,8 +208,8 @@ fun ScanScreen() {
                 )
         ) {
             Icon(
-                imageVector = Icons.Default.Folder,
-                contentDescription = "Taramalarım",
+                imageVector = Icons.Default.ArrowBack,
+                contentDescription = "Geri",
                 tint = MaterialTheme.colorScheme.primary
             )
         }
@@ -219,7 +226,6 @@ fun ScanScreen() {
                 Log.i("ScanScreen", "Capture triggered (Phase 2.1.2 — Mode: ${if (multiLensMode) "multi-lens" else "burst"})")
 
                 captureScope.launch {
-                    orchestrator.startNewSession(sessionFrameStore)
 
                     val filesOrMap: Any = if (multiLensMode) {
                         orchestrator.captureMultiLens(

@@ -6,7 +6,17 @@ import java.io.File
 import java.util.UUID
 
 /**
- * Phase 2.3 — Tek bir tarama oturumunu (project) temsil eder.
+ * Faz 1 — Tarama oturumlarının durum makinesi.
+ */
+enum class ScanStatus {
+    DRAFT,
+    CAPTURING,
+    RENDERING,
+    COMPLETED
+}
+
+/**
+ * Phase 2.3 & Faz 1 — Tek bir tarama oturumunu (project) temsil eder.
  *
  * Her capture trigger → yeni bir ScanSession (UUID + klasör) oluşturur.
  * MyScansScreen bu modelin listesini gösterir.
@@ -18,6 +28,7 @@ data class ScanSession(
     val frames: List<ScanFrame>,
     val totalBytes: Long,
     val folder: File,                     // scan_projects/<sessionId>/
+    val status: ScanStatus = ScanStatus.DRAFT, // [Faz 1]
 ) {
     val frameCount: Int get() = frames.size
     val lensesUsed: Set<String> get() = frames.map { it.lensType }.toSet()
@@ -50,6 +61,11 @@ data class ScanSession(
                         capturedAtMs = f.getLong("capturedAtMs"),
                     )
                 }
+
+                // [Faz 1] Parse status
+                val statusStr = root.optString("status", ScanStatus.DRAFT.name)
+                val status = runCatching { ScanStatus.valueOf(statusStr) }.getOrDefault(ScanStatus.DRAFT)
+
                 ScanSession(
                     sessionId = UUID.fromString(root.getString("sessionId")),
                     projectName = root.optString("projectName", "Tarama"),
@@ -57,6 +73,7 @@ data class ScanSession(
                     frames = frames,
                     totalBytes = root.optLong("totalBytes", frames.sumOf { it.bytes }),
                     folder = folder,
+                    status = status,
                 )
             }.getOrNull()
         }

@@ -68,7 +68,11 @@ class MultiLensCaptureOrchestrator(
     private var auxLensMap: Map<String, CameraLens>? = null
 
     var activeSession: ScanSession? = null
-        private set
+        internal set
+
+    fun bindSession(session: ScanSession) {
+        activeSession = session
+    }
 
     suspend fun startNewSession(store: SessionFrameStore, name: String? = null) {
         activeSession = store.createSession(name)
