@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -46,6 +47,7 @@ fun ScanDetailScreen(
     session: ScanSession,
     onClose: () -> Unit,
     onShareZip: (ScanSession) -> Unit,   // [Phase 2.6]
+    onEnqueueIngestion: (ScanSession) -> Unit, // [Phase 3.3]
 ) {
     Scaffold(
         topBar = {
@@ -73,6 +75,13 @@ fun ScanDetailScreen(
                         Icon(
                             imageVector = Icons.Default.Share,
                             contentDescription = "ZIP olarak paylaş",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    IconButton(onClick = { onEnqueueIngestion(session) }) {
+                        Icon(
+                            imageVector = Icons.Default.Send,
+                            contentDescription = "AlgorDroid'e Gönder",
                             tint = MaterialTheme.colorScheme.primary
                         )
                     }

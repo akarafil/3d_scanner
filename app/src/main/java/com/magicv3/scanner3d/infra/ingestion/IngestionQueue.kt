@@ -14,7 +14,7 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 /**
- * Faz 3.2 - Ingestion Durum Makinesi
+ * Faz 3.2 & 3.3 - Ingestion Durum Makinesi
  */
 sealed interface IngestionState {
     data object Idle : IngestionState
@@ -42,6 +42,7 @@ class IngestionQueue(
     private val exifValidator = ExifValidator()
     private val manifestGenerator = ManifestGenerator(context)
     private val mnpExporter = MnpExporter(context)
+    private val transferAdapter = AlgorDroidTransferAdapter(context)
 
     private val _queueState = MutableStateFlow<IngestionState>(IngestionState.Idle)
     val queueState: StateFlow<IngestionState> = _queueState.asStateFlow()
@@ -61,6 +62,10 @@ class IngestionQueue(
         _queueState.update { IngestionState.Queued(sId) }
         channel.trySend(IngestionItem(session))
         android.util.Log.i("IngestionQueue", "Enqueued session: $sId")
+    }
+
+    fun resetToIdle() {
+        _queueState.value = IngestionState.Idle
     }
 
     private suspend fun processIngestion(item: IngestionItem) {
@@ -85,10 +90,15 @@ class IngestionQueue(
 
             // 3. TRANSFERRING
             _queueState.value = IngestionState.Transferring(sId, mnpResult.file)
+            val transfer = transferAdapter.dispatchPackage(sId, mnpResult.file, mnpResult.uri)
 
-            // 4. DELIVERED
-            _queueState.value = IngestionState.Delivered(sId, mnpResult.file)
-            android.util.Log.i("IngestionQueue", "Successfully delivered MNP for $sId")
+            if (transfer.success) {
+                // 4. DELIVERED
+                _queueState.value = IngestionState.Delivered(sId, mnpResult.file)
+                android.util.Log.i("IngestionQueue", "Successfully delivered MNP for $sId")
+            } else {
+                _queueState.value = IngestionState.Failed(sId, transfer.message)
+            }
         }.onFailure { e ->
             android.util.Log.e("IngestionQueue", "Ingestion failed for $sId", e)
             _queueState.value = IngestionState.Failed(sId, e.message ?: "Bilinmeyen kuyruk hatası")

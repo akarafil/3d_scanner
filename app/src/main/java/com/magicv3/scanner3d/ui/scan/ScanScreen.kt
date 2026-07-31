@@ -50,6 +50,8 @@ import com.magicv3.scanner3d.infra.camera.RawAuxCaptureSession
 import com.magicv3.scanner3d.infra.camera.MultiLensCaptureOrchestrator
 import com.magicv3.scanner3d.infra.storage.SessionFrameStore
 import com.magicv3.scanner3d.infra.storage.ZipExporter
+import com.magicv3.scanner3d.infra.ingestion.IngestionQueue
+import com.magicv3.scanner3d.infra.ingestion.IngestionState
 import com.magicv3.scanner3d.ui.capture.CaptureButton
 import com.magicv3.scanner3d.ui.capture.CaptureState
 import com.magicv3.scanner3d.ui.hud.SystemHud
@@ -92,6 +94,10 @@ fun ScanScreen() {
     // [Phase 2.6] Zip sharing status and exporter
     var zipShareState by remember { mutableStateOf<ZipShareState>(ZipShareState.Idle) }
     val zipExporter = remember { ZipExporter(context) }
+
+    // [Phase 3.3] Ingestion queue and state
+    val ingestionQueue = remember { IngestionQueue(context) }
+    val ingestionState by ingestionQueue.queueState.collectAsStateWithLifecycle()
 
     val orchestrator = remember { MultiLensCaptureOrchestrator(context, sessionFrameStore) }
     val progressState by orchestrator.progress.collectAsStateWithLifecycle()
@@ -324,7 +330,8 @@ fun ScanScreen() {
         ScanDetailScreen(
             session = session,
             onClose = { openedSession = null },
-            onShareZip = { s -> triggerZipShare(s) }
+            onShareZip = { s -> triggerZipShare(s) },
+            onEnqueueIngestion = { s -> ingestionQueue.enqueue(s) }
         )
     }
 
@@ -351,6 +358,76 @@ fun ScanScreen() {
             },
             title = { Text("Paylaşım başarısız") },
             text = { Text(s.message) }
+        )
+        else -> {}
+    }
+
+    // [Phase 3.3] — Ingestion Queue Status Dialogs
+    when (val s = ingestionState) {
+        is IngestionState.Queued -> AlertDialog(
+            onDismissRequest = {},
+            confirmButton = {},
+            title = { Text("Kuyruğa Alındı") },
+            text = { Text("Proje kuyruğa alındı, işleme bekleniyor...") }
+        )
+        is IngestionState.Validating -> AlertDialog(
+            onDismissRequest = {},
+            confirmButton = {},
+            title = { Text("EXIF Doğrulanıyor") },
+            text = {
+                Column {
+                    Text("Kare bütünlüğü kontrol ediliyor...")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+            }
+        )
+        is IngestionState.Packaging -> AlertDialog(
+            onDismissRequest = {},
+            confirmButton = {},
+            title = { Text("MNP Paketi Hazırlanıyor") },
+            text = {
+                Column {
+                    Text("${s.progress} / ${s.total} kare paketleniyor...")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LinearProgressIndicator(
+                        progress = { if (s.total > 0) s.progress.toFloat() / s.total else 0f },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+        )
+        is IngestionState.Transferring -> AlertDialog(
+            onDismissRequest = {},
+            confirmButton = {},
+            title = { Text("AlgorDroid'e İletiliyor") },
+            text = {
+                Column {
+                    Text("M3SP Paketi transfer ediliyor...")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+            }
+        )
+        is IngestionState.Delivered -> AlertDialog(
+            onDismissRequest = { ingestionQueue.resetToIdle() },
+            confirmButton = {
+                TextButton(onClick = { ingestionQueue.resetToIdle() }) {
+                    Text("Harika")
+                }
+            },
+            title = { Text("Başarıyla Teslim Edildi") },
+            text = { Text("MNP paketi AlgorDroid motoruna başarıyla iletildi.") }
+        )
+        is IngestionState.Failed -> AlertDialog(
+            onDismissRequest = { ingestionQueue.resetToIdle() },
+            confirmButton = {
+                TextButton(onClick = { ingestionQueue.resetToIdle() }) {
+                    Text("Kapat")
+                }
+            },
+            title = { Text("Hata") },
+            text = { Text(s.reason) }
         )
         else -> {}
     }
