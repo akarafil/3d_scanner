@@ -56,7 +56,7 @@ class SessionFrameStore(private val context: Context) {
             // [Phase 2.5] Auto-name uniqueness: saniye hassasiyeti + mevcut isim çakışması varsa counter
             val autoName = projectName?.takeIf { it.isNotBlank() } ?: run {
                 val baseTime = java.text.SimpleDateFormat(
-                    "yyyy-MM-dd HR:mm:ss", java.util.Locale("tr")
+                    "yyyy-MM-dd HH:mm:ss", java.util.Locale("tr")
                 ).format(java.util.Date(now))
                 "Tarama $baseTime"
             }
