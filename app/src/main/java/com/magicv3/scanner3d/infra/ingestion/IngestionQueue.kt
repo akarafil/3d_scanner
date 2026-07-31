@@ -1,7 +1,10 @@
 package com.magicv3.scanner3d.infra.ingestion
 
 import android.content.Context
+import android.net.Uri
 import com.magicv3.scanner3d.domain.model.ScanSession
+import com.magicv3.scanner3d.infra.storage.CacheCleaner
+import com.magicv3.scanner3d.infra.storage.MeshRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -14,7 +17,7 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 /**
- * Faz 3.2 & 3.3 - Ingestion Durum Makinesi
+ * Faz 3.2, 3.3 & 4.1 - Ingestion Durum Makinesi
  */
 sealed interface IngestionState {
     data object Idle : IngestionState
@@ -23,6 +26,8 @@ sealed interface IngestionState {
     data class Packaging(val sessionId: String, val progress: Int, val total: Int) : IngestionState
     data class Transferring(val sessionId: String, val mnpFile: File) : IngestionState
     data class Delivered(val sessionId: String, val mnpFile: File) : IngestionState
+    data class Reconstructing(val sessionId: String, val progress: Int) : IngestionState
+    data class Reconstructed(val sessionId: String, val meshFile: File) : IngestionState
     data class Failed(val sessionId: String, val reason: String) : IngestionState
 }
 
@@ -32,9 +37,9 @@ data class IngestionItem(
 )
 
 /**
- * AlgorDroid ingestion kuyruk yöneticisi.
+ * AlgorDroid Ingestion kuyruk yöneticisi (Thread-Safe Singleton).
  */
-class IngestionQueue(
+class IngestionQueue private constructor(
     private val context: Context,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 ) {
@@ -43,6 +48,8 @@ class IngestionQueue(
     private val manifestGenerator = ManifestGenerator(context)
     private val mnpExporter = MnpExporter(context)
     private val transferAdapter = AlgorDroidTransferAdapter(context)
+    private val meshRepository = MeshRepository(context)
+    private val cacheCleaner = CacheCleaner(context)
 
     private val _queueState = MutableStateFlow<IngestionState>(IngestionState.Idle)
     val queueState: StateFlow<IngestionState> = _queueState.asStateFlow()
@@ -61,11 +68,42 @@ class IngestionQueue(
         val sId = session.sessionId.toString()
         _queueState.update { IngestionState.Queued(sId) }
         channel.trySend(IngestionItem(session))
-        android.util.Log.i("IngestionQueue", "Enqueued session: $sId")
+        android.util.Log.i(TAG, "Enqueued session: $sId")
     }
 
     fun resetToIdle() {
         _queueState.value = IngestionState.Idle
+    }
+
+    /**
+     * Faz 4.1 — AlgorDroidResultReceiver tarafından tetiklenen ilerleme güncellemesi.
+     */
+    fun updateProgress(sessionId: String, progress: Int) {
+        _queueState.value = IngestionState.Reconstructing(sessionId, progress)
+    }
+
+    /**
+     * Faz 4.1 & 4.2 — Rekonstrüksiyon başarıyla tamamlandığında mesh dosyasını içeri aktarır.
+     */
+    fun markComplete(sessionId: String, meshUri: Uri) {
+        scope.launch {
+            _queueState.value = IngestionState.Transferring(sessionId, File(context.cacheDir, "temp_mesh")) // placeholder state
+            val meshFile = meshRepository.importMesh(sessionId, meshUri)
+            if (meshFile != null) {
+                _queueState.value = IngestionState.Reconstructed(sessionId, meshFile)
+                // Cache temizliği tetikle
+                cacheCleaner.cleanExpiredCache()
+            } else {
+                _queueState.value = IngestionState.Failed(sessionId, "3D model kopyalanamadı.")
+            }
+        }
+    }
+
+    /**
+     * Faz 4.1 — Motor hatası durumunda durumu Failed olarak ayarlar.
+     */
+    fun markError(sessionId: String, error: String) {
+        _queueState.value = IngestionState.Failed(sessionId, error)
     }
 
     private suspend fun processIngestion(item: IngestionItem) {
@@ -95,13 +133,26 @@ class IngestionQueue(
             if (transfer.success) {
                 // 4. DELIVERED
                 _queueState.value = IngestionState.Delivered(sId, mnpResult.file)
-                android.util.Log.i("IngestionQueue", "Successfully delivered MNP for $sId")
+                android.util.Log.i(TAG, "Successfully delivered MNP for $sId")
             } else {
                 _queueState.value = IngestionState.Failed(sId, transfer.message)
             }
         }.onFailure { e ->
-            android.util.Log.e("IngestionQueue", "Ingestion failed for $sId", e)
+            android.util.Log.e(TAG, "Ingestion failed for $sId", e)
             _queueState.value = IngestionState.Failed(sId, e.message ?: "Bilinmeyen kuyruk hatası")
+        }
+    }
+
+    companion object {
+        private const val TAG = "IngestionQueue"
+
+        @Volatile
+        private var INSTANCE: IngestionQueue? = null
+
+        fun getInstance(context: Context): IngestionQueue {
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: IngestionQueue(context.applicationContext).also { INSTANCE = it }
+            }
         }
     }
 }

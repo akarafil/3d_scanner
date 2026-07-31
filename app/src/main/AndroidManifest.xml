@@ -32,6 +32,16 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <receiver
+            android:name=".infra.ingestion.AlgorDroidResultReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.algordroid.engine.ACTION_PROCESSING_PROGRESS" />
+                <action android:name="com.algordroid.engine.ACTION_PROCESSING_COMPLETE" />
+                <action android:name="com.algordroid.engine.ACTION_PROCESSING_ERROR" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

@@ -96,7 +96,7 @@ fun ScanScreen() {
     val zipExporter = remember { ZipExporter(context) }
 
     // [Phase 3.3] Ingestion queue and state
-    val ingestionQueue = remember { IngestionQueue(context) }
+    val ingestionQueue = remember { IngestionQueue.getInstance(context) }
     val ingestionState by ingestionQueue.queueState.collectAsStateWithLifecycle()
 
     val orchestrator = remember { MultiLensCaptureOrchestrator(context, sessionFrameStore) }
