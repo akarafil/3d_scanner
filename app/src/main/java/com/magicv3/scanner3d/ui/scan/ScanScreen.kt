@@ -233,14 +233,18 @@ fun ScanScreen() {
                         @Suppress("UNCHECKED_CAST")
                         val map = filesOrMap as Map<String, File>
                         map.forEach { (k, v) ->
-                            Log.i("ScanScreen", "MultiLens[$k] → ${v.absolutePath} (${v.length()} B)")
+                            val savedFrame = orchestrator.activeSession?.frames?.lastOrNull { it.lensId == k }
+                            val frameSize = savedFrame?.bytes ?: 0L
+                            Log.d("ScanScreen", "MultiLens[$k] frame saved: ${savedFrame?.file?.name} ($frameSize B)")
                         }
                         map.size
                     } else {
                         @Suppress("UNCHECKED_CAST")
                         val files = filesOrMap as List<File>
                         files.forEachIndexed { idx, f ->
-                            Log.i("ScanScreen", "Burst[$idx] → ${f.absolutePath} (${f.length()} B)")
+                            val savedFrame = orchestrator.activeSession?.frames?.getOrNull(idx)
+                            val frameSize = savedFrame?.bytes ?: 0L
+                            Log.d("ScanScreen", "Burst[$idx] frame saved: ${savedFrame?.file?.name} ($frameSize B)")
                         }
                         files.size
                     }

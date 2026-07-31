@@ -49,7 +49,7 @@ class AuxExifWriter {
             // ---- Identity / Source ----
             exif.setAttribute(ExifInterface.TAG_MAKE, "Honor")
             exif.setAttribute(ExifInterface.TAG_MODEL, "Magic V3")
-            exif.setAttribute(ExifInterface.TAG_SOFTWARE, "Magic 3D Scanner v2 — Phase 2.2 (AuxBypass)")
+            exif.setAttribute(ExifInterface.TAG_SOFTWARE, "Magic 3D Scanner v2 - Phase 2.2 (AuxBypass)")
 
             // ---- Lens Identity (SfM feature grouping için) ----
             val lensModel = when (lens?.lensType) {
