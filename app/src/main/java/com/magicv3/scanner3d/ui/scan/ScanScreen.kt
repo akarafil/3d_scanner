@@ -44,7 +44,9 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.magicv3.scanner3d.domain.model.ScanSession
 import com.magicv3.scanner3d.domain.model.ScanStatus
-import com.magicv3.scanner3d.domain.ar.ArCoreTracker
+import com.magicv3.scanner3d.domain.ar.CameraPose
+import com.magicv3.scanner3d.ui.scan.ArPointCloudSurfaceView
+import androidx.compose.ui.viewinterop.AndroidView
 import com.magicv3.scanner3d.infra.camera.CameraController
 import com.magicv3.scanner3d.infra.camera.CameraLensCatalog
 import kotlinx.coroutines.isActive
@@ -108,21 +110,16 @@ fun ScanScreen(
     val orchestrator = remember { MultiLensCaptureOrchestrator(context, sessionFrameStore) }
     val progressState by orchestrator.progress.collectAsStateWithLifecycle()
 
-    val arTracker = remember { ArCoreTracker(context) }
-
-    DisposableEffect(Unit) {
-        arTracker.setupSession()
-        onDispose {
-            arTracker.stopSession()
+    var latestCameraPose by remember { mutableStateOf<CameraPose?>(null) }
+    val arSurfaceView = remember {
+        ArPointCloudSurfaceView(context) { pose ->
+            latestCameraPose = pose
         }
     }
 
-    LaunchedEffect(Unit) {
-        while (isActive) {
-            if (!arTracker.isPaused) {
-                arTracker.updateFrame()
-            }
-            delay(16)
+    DisposableEffect(Unit) {
+        onDispose {
+            arSurfaceView.onDestroy()
         }
     }
 
@@ -168,8 +165,8 @@ fun ScanScreen(
             }
         )
 
-        LivePointCloudOverlay(
-            arTracker = arTracker,
+        AndroidView(
+            factory = { arSurfaceView },
             modifier = Modifier.fillMaxSize()
         )
 
@@ -252,8 +249,8 @@ fun ScanScreen(
                 Log.i("ScanScreen", "Capture triggered (Phase 2.1.2 — Mode: ${if (multiLensMode) "multi-lens" else "burst"})")
 
                 captureScope.launch {
-                    arTracker.pauseSession()
-                    val pose = arTracker.currentPose
+                    arSurfaceView.onPause()
+                    val pose = latestCameraPose
                     val trans = pose?.translation
                     val rot = pose?.rotationQuaternion
 
@@ -274,7 +271,7 @@ fun ScanScreen(
                             rotation = rot
                         )
                     }
-                    arTracker.setupSession()
+                    arSurfaceView.onResume()
 
                     val fileCount: Int = if (multiLensMode) {
                         @Suppress("UNCHECKED_CAST")
