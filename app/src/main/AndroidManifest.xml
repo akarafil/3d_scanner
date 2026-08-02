@@ -4,6 +4,10 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 
+    <queries>
+        <package android:name="com.algordroid.engine" />
+    </queries>
+
     <application
         android:name=".MagicScannerApplication"
         android:allowBackup="true"
