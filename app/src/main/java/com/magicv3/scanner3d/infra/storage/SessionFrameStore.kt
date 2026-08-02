@@ -10,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -79,7 +80,7 @@ class SessionFrameStore(private val context: Context) {
             )
             writeMeta(session)
             android.util.Log.i(TAG, "Created session: $finalName (folder=$folder)")
-            refresh()
+            updateSessionInMemory(session)
             session
         }
 
@@ -156,7 +157,7 @@ class SessionFrameStore(private val context: Context) {
             android.util.Log.e(TAG, "Failed to generate manifest or validate EXIF", e)
         }
 
-        refresh()
+        updateSessionInMemory(updated)
         updated
     }
 
@@ -166,7 +167,9 @@ class SessionFrameStore(private val context: Context) {
             target.deleteRecursively()
             android.util.Log.i(TAG, "Deleted session: $sessionId")
         }
-        refresh()
+        _sessions.update { list ->
+            list.filter { it.sessionId != sessionId }
+        }
     }
 
     suspend fun renameSession(sessionId: UUID, newName: String) = withContext(Dispatchers.IO) {
@@ -174,7 +177,7 @@ class SessionFrameStore(private val context: Context) {
         val current = ScanSession.fromJson(folder) ?: return@withContext
         val updated = current.copy(projectName = newName.takeIf { it.isNotBlank() } ?: current.projectName)
         writeMeta(updated)
-        refresh()
+        updateSessionInMemory(updated)
     }
 
     suspend fun updateStatus(sessionId: UUID, status: ScanStatus) = withContext(Dispatchers.IO) {
@@ -182,7 +185,19 @@ class SessionFrameStore(private val context: Context) {
         val current = ScanSession.fromJson(folder) ?: return@withContext
         val updated = current.copy(status = status)
         writeMeta(updated)
-        refresh()
+        updateSessionInMemory(updated)
+    }
+
+    private fun updateSessionInMemory(updated: ScanSession) {
+        _sessions.update { list ->
+            val hasSession = list.any { it.sessionId == updated.sessionId }
+            val newList = if (hasSession) {
+                list.map { if (it.sessionId == updated.sessionId) updated else it }
+            } else {
+                list + updated
+            }
+            newList.sortedByDescending { it.createdAtMs }
+        }
     }
 
     private fun writeMeta(session: ScanSession) {
@@ -207,7 +222,13 @@ class SessionFrameStore(private val context: Context) {
             put("status", session.status.name)
             put("frames", framesArr)
         }
-        File(session.folder, "meta.json").writeText(root.toString(2))
+        val temp = File(session.folder, "meta.json.tmp")
+        temp.writeText(root.toString(2))
+        val target = File(session.folder, "meta.json")
+        if (!temp.renameTo(target)) {
+            temp.copyTo(target, overwrite = true)
+            temp.delete()
+        }
     }
 
     companion object {
