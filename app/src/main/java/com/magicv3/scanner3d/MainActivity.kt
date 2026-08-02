@@ -30,6 +30,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
 import com.magicv3.scanner3d.domain.model.ScanSession
 import com.magicv3.scanner3d.domain.model.ScanStatus
@@ -103,29 +104,34 @@ fun MagicScannerApp() {
                     sessionFrameStore = store,
                     onBack = { currentScreen = Screen.Home }
                 )
-                is Screen.ScanDetail -> ScanDetailScreen(
-                    session = scr.session,
-                    onClose = { currentScreen = Screen.MyScans },
-                    onShareZip = { session ->
-                        scope.launch {
-                            runCatching {
-                                val zipExporter = ZipExporter(context)
-                                val result = zipExporter.export(session)
-                                zipExporter.launchShareSheet(result, session.projectName)
+                is Screen.ScanDetail -> {
+                    val sessionsList by store.sessions.collectAsStateWithLifecycle()
+                    val liveSession = remember(sessionsList, scr.session.sessionId) {
+                        sessionsList.firstOrNull { it.sessionId == scr.session.sessionId } ?: scr.session
+                    }
+                    ScanDetailScreen(
+                        session = liveSession,
+                        onClose = { currentScreen = Screen.MyScans },
+                        onShareZip = { session ->
+                            scope.launch {
+                                runCatching {
+                                    val zipExporter = ZipExporter(context)
+                                    val result = zipExporter.export(session)
+                                    zipExporter.launchShareSheet(result, session.projectName)
+                                }
+                            }
+                        },
+                        onResumeCapture = {
+                            currentScreen = Screen.Scan(liveSession)
+                        },
+                        onStart3DRender = {
+                            scope.launch {
+                                store.updateStatus(liveSession.sessionId, ScanStatus.RENDERING)
+                                ingestionQueue.enqueue(liveSession)
                             }
                         }
-                    },
-                    onResumeCapture = {
-                        currentScreen = Screen.Scan(scr.session)
-                    },
-                    onStart3DRender = {
-                        scope.launch {
-                            store.updateStatus(scr.session.sessionId, ScanStatus.RENDERING)
-                            ingestionQueue.enqueue(scr.session)
-                            currentScreen = Screen.MyScans
-                        }
-                    }
-                )
+                    )
+                }
             }
         }
 
