@@ -8,6 +8,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.util.zip.CRC32
 import java.util.zip.Deflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -95,9 +96,26 @@ class MnpExporter(private val context: Context) {
                 // frames/*
                 val total = session.frames.size
                 session.frames.forEachIndexed { i, frame ->
-                    if (frame.file.exists()) {
-                        zos.putNextEntry(ZipEntry("frames/${frame.file.name}"))
-                        frame.file.inputStream().use { it.copyTo(zos) }
+                    val file = frame.file
+                    if (file.exists()) {
+                        val size = file.length()
+                        val crc = java.util.zip.CRC32()
+                        file.inputStream().use { input ->
+                            val buffer = ByteArray(8192)
+                            var read: Int
+                            while (input.read(buffer).also { read = it } > 0) {
+                                crc.update(buffer, 0, read)
+                            }
+                        }
+
+                        val entry = ZipEntry("frames/${file.name}").apply {
+                            method = ZipEntry.STORED
+                            setSize(size)
+                            setCompressedSize(size)
+                            setCrc(crc.value)
+                        }
+                        zos.putNextEntry(entry)
+                        file.inputStream().use { it.copyTo(zos) }
                         zos.closeEntry()
                         progress?.invoke(i + 1, total)
                     }
