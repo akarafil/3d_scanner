@@ -43,6 +43,7 @@ import com.magicv3.scanner3d.ui.scan.HomeScreen
 import com.magicv3.scanner3d.ui.scan.MyScansScreen
 import com.magicv3.scanner3d.ui.scan.ScanDetailScreen
 import com.magicv3.scanner3d.ui.scan.ScanScreen
+import com.magicv3.scanner3d.ui.scan.ScanViewModel
 import com.magicv3.scanner3d.ui.theme.MagicScannerTheme
 
 class MainActivity : ComponentActivity() {
@@ -99,11 +100,20 @@ fun MagicScannerApp() {
                     onClose = { currentScreen = Screen.Home },
                     onOpen = { session -> currentScreen = Screen.ScanDetail(session) }
                 )
-                is Screen.Scan -> ScanScreen(
-                    activeSession = scr.session,
-                    sessionFrameStore = store,
-                    onBack = { currentScreen = Screen.Home }
-                )
+                is Screen.Scan -> {
+                    val application = LocalContext.current.applicationContext as android.app.Application
+                    val scanViewModel = remember(scr.session.sessionId) {
+                        ScanViewModel(
+                            application = application,
+                            sessionFrameStore = store,
+                            activeSession = scr.session
+                        )
+                    }
+                    ScanScreen(
+                        viewModel = scanViewModel,
+                        onBack = { currentScreen = Screen.Home }
+                    )
+                }
                 is Screen.ScanDetail -> {
                     val sessionsList by store.sessions.collectAsStateWithLifecycle()
                     val liveSession = remember(sessionsList, scr.session.sessionId) {
