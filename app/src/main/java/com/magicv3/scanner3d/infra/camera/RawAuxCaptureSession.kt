@@ -80,7 +80,11 @@ class RawAuxCaptureSession(
      * Open the aux camera, take ONE still frame, encode to JPEG, save to filesDir, return the File.
      * All resources closed in finally {} regardless of success or failure.
      */
-    suspend fun captureSingleFrame(): Result<File> = withContext(Dispatchers.IO) {
+    suspend fun captureSingleFrame(
+        manualIso: Int? = null,
+        manualExposureTimeNs: Long? = null,
+        manualFocusDistance: Float? = null,
+    ): Result<File> = withContext(Dispatchers.IO) {
         try {
             startHandlerThread()
             val cam = openCameraDirect()
@@ -88,7 +92,7 @@ class RawAuxCaptureSession(
             Log.i(TAG, "[$cameraId] capture size = ${captureSize.width}x${captureSize.height}")
 
             val file = withTimeoutOrNull(CAPTURE_TIMEOUT_MS) {
-                val image = createSessionAndCapture(cam, captureSize)
+                val image = createSessionAndCapture(cam, captureSize, manualIso, manualExposureTimeNs, manualFocusDistance)
                 val jpegBytes = yuv420ToJpeg(image, captureSize.width, captureSize.height)
                 image.close()
                 saveJpeg(jpegBytes, cameraId)
@@ -187,7 +191,13 @@ class RawAuxCaptureSession(
 
     // ───────────────────────── 4. Session + single capture ─────────────────────────
 
-    private suspend fun createSessionAndCapture(cam: CameraDevice, size: Size): Image {
+    private suspend fun createSessionAndCapture(
+        cam: CameraDevice,
+        size: Size,
+        manualIso: Int? = null,
+        manualExposureTimeNs: Long? = null,
+        manualFocusDistance: Float? = null,
+    ): Image {
         val reader = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, MAX_IMAGES)
         imageReader = reader
 
@@ -231,8 +241,26 @@ class RawAuxCaptureSession(
         // Build still capture request — only target the ImageReader surface (no preview surface here)
         val requestBuilder = cam.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
             addTarget(reader.surface)
-            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-            set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH)
+
+            // Pozlama ve ISO Kilidi
+            if (manualIso != null && manualExposureTimeNs != null) {
+                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                set(CaptureRequest.SENSOR_SENSITIVITY, manualIso)
+                set(CaptureRequest.SENSOR_EXPOSURE_TIME, manualExposureTimeNs)
+                Log.i(TAG, "[$cameraId] Pozlama kilitlendi: ISO=$manualIso, Enstantane=${manualExposureTimeNs}ns")
+            } else {
+                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH)
+            }
+
+            // Odak Kilidi
+            if (manualFocusDistance != null) {
+                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                set(CaptureRequest.LENS_FOCUS_DISTANCE, manualFocusDistance)
+                Log.i(TAG, "[$cameraId] Odak kilitlendi: LENS_FOCUS_DISTANCE=$manualFocusDistance")
+            } else {
+                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            }
+
             set(CaptureRequest.JPEG_ORIENTATION, currentDisplayRotationDegrees())
         }
 

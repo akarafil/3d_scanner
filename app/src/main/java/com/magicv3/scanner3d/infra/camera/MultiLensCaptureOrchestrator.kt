@@ -103,9 +103,18 @@ class MultiLensCaptureOrchestrator(
         lensId: String,
         sessionId: UUID,
         translation: FloatArray? = null,
-        rotation: FloatArray? = null
+        rotation: FloatArray? = null,
+        manualIso: Int? = null,
+        manualExposureTimeNs: Long? = null,
+        manualFocusDistance: Float? = null,
     ): File? {
-        val raw = captureWithRetry(lensId, attempt = 0) ?: return null
+        val raw = captureWithRetry(
+            lensId = lensId,
+            attempt = 0,
+            manualIso = manualIso,
+            manualExposureTimeNs = manualExposureTimeNs,
+            manualFocusDistance = manualFocusDistance
+        ) ?: return null
         val (w, h) = runCatching { readImageSize(raw) }.getOrDefault(Pair(0, 0))
         val lens = getAuxLensMap()[lensId]
         val stamped = exifWriter.stamp(
@@ -141,13 +150,24 @@ class MultiLensCaptureOrchestrator(
         lensId: String = DEFAULT_LENS,
         count: Int = DEFAULT_BURST,
         translation: FloatArray? = null,
-        rotation: FloatArray? = null
+        rotation: FloatArray? = null,
+        manualIso: Int? = null,
+        manualExposureTimeNs: Long? = null,
+        manualFocusDistance: Float? = null,
     ): List<File> = withContext(Dispatchers.IO) {
         val sessionId = activeSession?.sessionId ?: UUID.randomUUID()
         val files = mutableListOf<File>()
         for (i in 0 until count) {
             _progress.value = CaptureProgress.FrameStarted(i, count, lensId)
-            val file = captureAndStamp(lensId, sessionId, translation, rotation)
+            val file = captureAndStamp(
+                lensId = lensId,
+                sessionId = sessionId,
+                translation = translation,
+                rotation = rotation,
+                manualIso = manualIso,
+                manualExposureTimeNs = manualExposureTimeNs,
+                manualFocusDistance = manualFocusDistance
+            )
             if (file != null) {
                 files.add(file)
                 _progress.value = CaptureProgress.FrameSuccess(i, count, lensId, file)
@@ -171,13 +191,24 @@ class MultiLensCaptureOrchestrator(
             RawAuxCaptureSession.AUX_ULTRAWIDE_ID,
         ),
         translation: FloatArray? = null,
-        rotation: FloatArray? = null
+        rotation: FloatArray? = null,
+        manualIso: Int? = null,
+        manualExposureTimeNs: Long? = null,
+        manualFocusDistance: Float? = null,
     ): Map<String, File> = withContext(Dispatchers.IO) {
         val sessionId = activeSession?.sessionId ?: UUID.randomUUID()
         val result = LinkedHashMap<String, File>()
         for (id in lensIds) {
             _progress.value = CaptureProgress.FrameStarted(result.size, lensIds.size, id)
-            val file = captureAndStamp(id, sessionId, translation, rotation)
+            val file = captureAndStamp(
+                lensId = id,
+                sessionId = sessionId,
+                translation = translation,
+                rotation = rotation,
+                manualIso = manualIso,
+                manualExposureTimeNs = manualExposureTimeNs,
+                manualFocusDistance = manualFocusDistance
+            )
             if (file != null) {
                 result[id] = file
                 _progress.value = CaptureProgress.FrameSuccess(result.size - 1, lensIds.size, id, file)
@@ -191,13 +222,23 @@ class MultiLensCaptureOrchestrator(
         result
     }
 
-    private suspend fun captureWithRetry(lensId: String, attempt: Int): File? {
+    private suspend fun captureWithRetry(
+        lensId: String,
+        attempt: Int,
+        manualIso: Int? = null,
+        manualExposureTimeNs: Long? = null,
+        manualFocusDistance: Float? = null,
+    ): File? {
         if (attempt > MAX_RETRIES_PER_FRAME) {
             Log.w(TAG, "[$lensId] giving up after $attempt retries")
             return null
         }
         val session = RawAuxCaptureSession(context, lensId, outputDir)
-        val result = session.captureSingleFrame()
+        val result = session.captureSingleFrame(
+            manualIso = manualIso,
+            manualExposureTimeNs = manualExposureTimeNs,
+            manualFocusDistance = manualFocusDistance
+        )
         return if (result.isSuccess) {
             result.getOrNull()!!.also { Log.i(TAG, "[$lensId] frame saved on attempt=$attempt") }
         } else {
