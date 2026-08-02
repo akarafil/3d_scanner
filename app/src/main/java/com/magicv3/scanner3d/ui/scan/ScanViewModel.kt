@@ -20,6 +20,7 @@ import com.magicv3.scanner3d.infra.ingestion.IngestionQueue
 import com.magicv3.scanner3d.infra.storage.SessionFrameStore
 import com.magicv3.scanner3d.infra.storage.ZipExporter
 import com.magicv3.scanner3d.infra.storage.PlyExporter
+import com.magicv3.scanner3d.infra.system.SystemMonitor
 import com.magicv3.scanner3d.ui.capture.CaptureState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -54,6 +55,7 @@ class ScanViewModel(
     val ingestionQueue = IngestionQueue.getInstance(context)
     private val zipExporter = ZipExporter(context)
     private val plyExporter = PlyExporter(context)
+    private val systemMonitor = SystemMonitor(context)
 
     // AI Engines & Use Cases
     private val depthEngine = DepthInferenceEngine(context)
@@ -120,11 +122,38 @@ class ScanViewModel(
     private val _plyExportState = MutableStateFlow<PlyExportState>(PlyExportState.Idle)
     val plyExportState: StateFlow<PlyExportState> = _plyExportState.asStateFlow()
 
+    // Thermal Throttling States
+    private val _isThermalThrottled = MutableStateFlow(false)
+    val isThermalThrottled: StateFlow<Boolean> = _isThermalThrottled.asStateFlow()
+
+    private val _currentSocTemp = MutableStateFlow(0f)
+    val currentSocTemp: StateFlow<Float> = _currentSocTemp.asStateFlow()
+
     private var isAiProcessing = false
 
     init {
         viewModelScope.launch {
             orchestrator.bindSession(activeSession)
+        }
+
+        // Periodically monitor temperature for hardware safety checks
+        viewModelScope.launch {
+            systemMonitor.monitorThermal(2000).collect { metrics ->
+                val temp = metrics.socTempC
+                _currentSocTemp.value = temp
+
+                if (temp >= 50f && !_isThermalThrottled.value) {
+                    _isThermalThrottled.value = true
+                    Log.w("ScanViewModel", "Thermal limit reached: $temp°C. Aborting capture actions.")
+                    if (_captureState.value == CaptureState.CAPTURING) {
+                        _captureState.value = CaptureState.IDLE
+                        _lastCaptureLog.value = "❌ Sıcaklık aşırı yüksek (>=50°C)! Çekim durduruldu."
+                    }
+                } else if (temp < 47f && _isThermalThrottled.value) {
+                    _isThermalThrottled.value = false
+                    Log.i("ScanViewModel", "Thermal recovery: $temp°C. Capture actions resumed.")
+                }
+            }
         }
     }
 
@@ -175,6 +204,10 @@ class ScanViewModel(
 
     fun resetPlyExportState() {
         _plyExportState.value = PlyExportState.Idle
+    }
+
+    fun resetThermalThrottled() {
+        _isThermalThrottled.value = false
     }
 
     fun clearAccumulatedPoints() {
@@ -395,6 +428,12 @@ class ScanViewModel(
         resumeArCallback: () -> Unit,
         latestCameraPose: CameraPose?
     ) {
+        if (_isThermalThrottled.value) {
+            _lastCaptureLog.value = "❌ Cihaz aşırı ısındı. Sıcaklık 47°C altına düşene kadar çekim yapılamaz."
+            Log.w("ScanViewModel", "Capture blocked due to thermal throttling.")
+            return
+        }
+
         if (_captureState.value != CaptureState.IDLE) return
 
         _triggerCounter.value += 1

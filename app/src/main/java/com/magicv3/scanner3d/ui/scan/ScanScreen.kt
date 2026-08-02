@@ -69,6 +69,8 @@ fun ScanScreen(
     val openedSession by viewModel.openedSession.collectAsStateWithLifecycle()
     val zipShareState by viewModel.zipShareState.collectAsStateWithLifecycle()
     val plyExportState by viewModel.plyExportState.collectAsStateWithLifecycle()
+    val isThermalThrottled by viewModel.isThermalThrottled.collectAsStateWithLifecycle()
+    val currentSocTemp by viewModel.currentSocTemp.collectAsStateWithLifecycle()
 
     // AI states
     val aiPreviewMode by viewModel.aiPreviewMode.collectAsStateWithLifecycle()
@@ -401,5 +403,12 @@ fun ScanScreen(
     PlyExportDialog(
         exportState = plyExportState,
         onDismiss = { viewModel.resetPlyExportState() }
+    )
+
+    // Thermal Throttling Protection Dialog
+    ThermalWarningDialog(
+        isThrottled = isThermalThrottled,
+        currentTemp = currentSocTemp,
+        onDismiss = { viewModel.resetThermalThrottled() }
     )
 }
