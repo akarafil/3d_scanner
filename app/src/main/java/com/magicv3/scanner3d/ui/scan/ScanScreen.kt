@@ -68,6 +68,7 @@ fun ScanScreen(
     val showMyScans by viewModel.showMyScans.collectAsStateWithLifecycle()
     val openedSession by viewModel.openedSession.collectAsStateWithLifecycle()
     val zipShareState by viewModel.zipShareState.collectAsStateWithLifecycle()
+    val plyExportState by viewModel.plyExportState.collectAsStateWithLifecycle()
 
     // AI states
     val aiPreviewMode by viewModel.aiPreviewMode.collectAsStateWithLifecycle()
@@ -379,7 +380,8 @@ fun ScanScreen(
             onClose = { viewModel.setOpenedSession(null) },
             onShareZip = { s -> viewModel.triggerZipShare(s) },
             onResumeCapture = { viewModel.setOpenedSession(null) },
-            onStart3DRender = { viewModel.enqueue3DRender(session) }
+            onStart3DRender = { viewModel.enqueue3DRender(session) },
+            onExportPly = { s -> viewModel.triggerPlyExport(s) }
         )
     }
 
@@ -393,5 +395,11 @@ fun ScanScreen(
     IngestionDialogs(
         ingestionState = ingestionState,
         onDismiss = { viewModel.resetIngestionToIdle() }
+    )
+
+    // PLY Export Progress dialogs
+    PlyExportDialog(
+        exportState = plyExportState,
+        onDismiss = { viewModel.resetPlyExportState() }
     )
 }

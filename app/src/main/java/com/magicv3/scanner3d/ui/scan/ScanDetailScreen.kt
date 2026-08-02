@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -59,6 +60,7 @@ fun ScanDetailScreen(
     onShareZip: (ScanSession) -> Unit,
     onResumeCapture: () -> Unit,
     onStart3DRender: () -> Unit,
+    onExportPly: ((ScanSession) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val ingestionQueue = remember { IngestionQueue.getInstance(context) }
@@ -134,7 +136,14 @@ fun ScanDetailScreen(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             // Önce meta kartı: 2 kolonu span'leyen header item
-            item(span = { GridItemSpan(2) }) { SessionMetaCard(session, onResumeCapture, onStart3DRender) }
+            item(span = { GridItemSpan(2) }) {
+                SessionMetaCard(
+                    session = session,
+                    onResumeCapture = onResumeCapture,
+                    onStart3DRender = onStart3DRender,
+                    onExportPly = onExportPly?.let { { it(session) } }
+                )
+            }
 
             // Faz 4.3 — Ingestion/Reconstruction durum HUD'ı
             val showProgress = currentSessionActive && when (ingestionState) {
@@ -168,7 +177,8 @@ fun ScanDetailScreen(
 private fun SessionMetaCard(
     session: ScanSession,
     onResumeCapture: () -> Unit,
-    onStart3DRender: () -> Unit
+    onStart3DRender: () -> Unit,
+    onExportPly: (() -> Unit)? = null
 ) {
     Box(
         modifier = Modifier
@@ -242,6 +252,26 @@ private fun SessionMetaCard(
                     )
                 ) {
                     Text("Render'ı Başlat", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+
+            if (onExportPly != null) {
+                Spacer(Modifier.height(12.dp))
+                Button(
+                    onClick = onExportPly,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.secondary
+                    )
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Share,
+                        contentDescription = "PLY",
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("3D PLY Dışa Aktar", style = MaterialTheme.typography.labelMedium)
                 }
             }
         }
