@@ -76,6 +76,8 @@ class RawAuxCaptureSession(
     private var captureSession: CameraCaptureSession? = null
     private var imageReader: ImageReader? = null
 
+    private var captureSize: Size? = null
+
     /**
      * Open the aux camera, take ONE still frame, encode to JPEG, save to filesDir, return the File.
      * All resources closed in finally {} regardless of success or failure.
@@ -86,29 +88,163 @@ class RawAuxCaptureSession(
         manualFocusDistance: Float? = null,
     ): Result<File> = withContext(Dispatchers.IO) {
         try {
-            startHandlerThread()
-            val cam = openCameraDirect()
-            val captureSize = pickYuvSize(cam)
-            Log.i(TAG, "[$cameraId] capture size = ${captureSize.width}x${captureSize.height}")
-
-            val file = withTimeoutOrNull(CAPTURE_TIMEOUT_MS) {
-                val image = createSessionAndCapture(cam, captureSize, manualIso, manualExposureTimeNs, manualFocusDistance)
-                val jpegBytes = yuv420ToJpeg(image, captureSize.width, captureSize.height)
-                image.close()
-                saveJpeg(jpegBytes, cameraId)
-            } ?: run {
-                Log.e(TAG, "[$cameraId] capture timed out after ${CAPTURE_TIMEOUT_MS}ms")
-                return@withContext Result.failure(IOException("capture timeout for id=$cameraId"))
-            }
-
-            Log.i(TAG, "[$cameraId] ✅ JPEG saved: ${file.absolutePath} (${file.length()} bytes)")
+            open()
+            val file = captureFrame(manualIso, manualExposureTimeNs, manualFocusDistance)
             Result.success(file)
         } catch (t: Throwable) {
             Log.e(TAG, "[$cameraId] capture failed: ${t.javaClass.simpleName}: ${t.message}", t)
             Result.failure(t)
         } finally {
-            closeQuietly()
+            close()
         }
+    }
+
+    /**
+     * Phase 2.1.1 — StickySession.
+     * Opens the camera device, checks output YUV size, initializes ImageReader and creates capture session.
+     */
+    suspend fun open(): Unit = withContext(Dispatchers.IO) {
+        startHandlerThread()
+        val cam = openCameraDirect()
+        val size = pickYuvSize(cam)
+        captureSize = size
+        Log.i(TAG, "[$cameraId] Sticky Session: camera opened, YUV size selected = ${size.width}x${size.height}")
+
+        val reader = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, MAX_IMAGES)
+        imageReader = reader
+
+        val session = suspendCancellableCoroutine<CameraCaptureSession> { cont ->
+            cam.createCaptureSession(
+                listOf<Surface>(reader.surface),
+                object : CameraCaptureSession.StateCallback() {
+                    override fun onConfigured(s: CameraCaptureSession) {
+                        Log.d(TAG, "[$cameraId] session onConfigured")
+                        if (cont.isActive) cont.resume(s)
+                    }
+
+                    override fun onConfigureFailed(s: CameraCaptureSession) {
+                        val msg = "[$cameraId] onConfigureFailed"
+                        Log.e(TAG, msg)
+                        if (cont.isActive) cont.resumeWithException(IOException(msg))
+                    }
+
+                    override fun onReady(s: CameraCaptureSession) {
+                        Log.d(TAG, "[$cameraId] session onReady")
+                    }
+                },
+                handler
+            )
+        }
+        captureSession = session
+    }
+
+    /**
+     * Phase 2.1.1 — StickySession.
+     * Captures a single frame using the already configured captureSession.
+     */
+    suspend fun captureFrame(
+        manualIso: Int? = null,
+        manualExposureTimeNs: Long? = null,
+        manualFocusDistance: Float? = null,
+    ): File = withContext(Dispatchers.IO) {
+        val cam = cameraDevice ?: throw IllegalStateException("[$cameraId] Camera not opened. Call open() first.")
+        val session = captureSession ?: throw IllegalStateException("[$cameraId] Capture session not active. Call open() first.")
+        val reader = imageReader ?: throw IllegalStateException("[$cameraId] ImageReader not initialized. Call open() first.")
+        val size = captureSize ?: throw IllegalStateException("[$cameraId] Capture size not selected. Call open() first.")
+
+        val imageDeferred = kotlinx.coroutines.CompletableDeferred<Image>()
+
+        reader.setOnImageAvailableListener({ r ->
+            val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
+            if (!imageDeferred.isCompleted) {
+                Log.d(TAG, "[$cameraId] ImageReader.onImageAvailable → handing frame to encoder")
+                imageDeferred.complete(img)
+            } else {
+                img.close()
+            }
+        }, handler)
+
+        // Build still capture request — target the ImageReader surface
+        val requestBuilder = cam.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+            addTarget(reader.surface)
+
+            // AE control
+            if (manualIso != null && manualExposureTimeNs != null) {
+                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                set(CaptureRequest.SENSOR_SENSITIVITY, manualIso)
+                set(CaptureRequest.SENSOR_EXPOSURE_TIME, manualExposureTimeNs)
+                Log.i(TAG, "[$cameraId] Pozlama kilitlendi: ISO=$manualIso, Enstantane=${manualExposureTimeNs}ns")
+            } else {
+                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH)
+            }
+
+            // AF control
+            if (manualFocusDistance != null) {
+                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                set(CaptureRequest.LENS_FOCUS_DISTANCE, manualFocusDistance)
+                Log.i(TAG, "[$cameraId] Odak kilitlendi: LENS_FOCUS_DISTANCE=$manualFocusDistance")
+            } else {
+                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            }
+
+            set(CaptureRequest.JPEG_ORIENTATION, currentDisplayRotationDegrees())
+        }
+
+        val file = withTimeoutOrNull(CAPTURE_TIMEOUT_MS) {
+            session.capture(
+                requestBuilder.build(),
+                object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureStarted(
+                        s: CameraCaptureSession,
+                        request: CaptureRequest,
+                        timestamp: Long,
+                        frameNumber: Long,
+                    ) {
+                        Log.d(TAG, "[$cameraId] onCaptureStarted frame=$frameNumber")
+                    }
+
+                    override fun onCaptureCompleted(
+                        s: CameraCaptureSession,
+                        request: CaptureRequest,
+                        result: TotalCaptureResult,
+                    ) {
+                        Log.d(TAG, "[$cameraId] onCaptureCompleted frame=${result.frameNumber}")
+                    }
+
+                    override fun onCaptureFailed(
+                        s: CameraCaptureSession,
+                        request: CaptureRequest,
+                        failure: android.hardware.camera2.CaptureFailure,
+                    ) {
+                        val msg = "[$cameraId] onCaptureFailed reason=${failure.reason} frame=${failure.frameNumber}"
+                        Log.e(TAG, msg)
+                        if (imageDeferred.isActive) {
+                            imageDeferred.completeExceptionally(IOException(msg))
+                        }
+                    }
+                },
+                handler,
+            )
+
+            val image = imageDeferred.await()
+            val jpegBytes = yuv420ToJpeg(image, size.width, size.height)
+            image.close()
+            saveJpeg(jpegBytes, cameraId)
+        } ?: run {
+            Log.e(TAG, "[$cameraId] capture timed out after ${CAPTURE_TIMEOUT_MS}ms")
+            throw IOException("capture timeout for id=$cameraId")
+        }
+
+        Log.i(TAG, "[$cameraId] ✅ JPEG saved: ${file.absolutePath} (${file.length()} bytes)")
+        file
+    }
+
+    /**
+     * Phase 2.1.1 — StickySession.
+     * Releases all camera resources and stops the background handler thread.
+     */
+    fun close() {
+        closeQuietly()
     }
 
     // ───────────────────────── 1. Handler / lifecycle ─────────────────────────
@@ -191,116 +327,7 @@ class RawAuxCaptureSession(
 
     // ───────────────────────── 4. Session + single capture ─────────────────────────
 
-    private suspend fun createSessionAndCapture(
-        cam: CameraDevice,
-        size: Size,
-        manualIso: Int? = null,
-        manualExposureTimeNs: Long? = null,
-        manualFocusDistance: Float? = null,
-    ): Image {
-        val reader = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, MAX_IMAGES)
-        imageReader = reader
 
-        val imageDeferred = kotlinx.coroutines.CompletableDeferred<Image>()
-
-        reader.setOnImageAvailableListener({ r ->
-            // We want the first frame after a fresh CLEAN capture, not a stale buffer.
-            val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
-            if (!imageDeferred.isCompleted) {
-                Log.d(TAG, "[$cameraId] ImageReader.onImageAvailable → handing frame to encoder")
-                imageDeferred.complete(img)
-            } else {
-                img.close()
-            }
-        }, handler)
-
-        val session = suspendCancellableCoroutine<CameraCaptureSession> { cont ->
-            cam.createCaptureSession(
-                listOf<Surface>(reader.surface),
-                object : CameraCaptureSession.StateCallback() {
-                    override fun onConfigured(s: CameraCaptureSession) {
-                        Log.d(TAG, "[$cameraId] session onConfigured")
-                        if (cont.isActive) cont.resume(s)
-                    }
-
-                    override fun onConfigureFailed(s: CameraCaptureSession) {
-                        val msg = "[$cameraId] onConfigureFailed"
-                        Log.e(TAG, msg)
-                        if (cont.isActive) cont.resumeWithException(IOException(msg))
-                    }
-
-                    override fun onReady(s: CameraCaptureSession) {
-                        Log.d(TAG, "[$cameraId] session onReady")
-                    }
-                },
-                handler
-            )
-        }
-        captureSession = session
-
-        // Build still capture request — only target the ImageReader surface (no preview surface here)
-        val requestBuilder = cam.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
-            addTarget(reader.surface)
-
-            // Pozlama ve ISO Kilidi
-            if (manualIso != null && manualExposureTimeNs != null) {
-                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
-                set(CaptureRequest.SENSOR_SENSITIVITY, manualIso)
-                set(CaptureRequest.SENSOR_EXPOSURE_TIME, manualExposureTimeNs)
-                Log.i(TAG, "[$cameraId] Pozlama kilitlendi: ISO=$manualIso, Enstantane=${manualExposureTimeNs}ns")
-            } else {
-                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH)
-            }
-
-            // Odak Kilidi
-            if (manualFocusDistance != null) {
-                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
-                set(CaptureRequest.LENS_FOCUS_DISTANCE, manualFocusDistance)
-                Log.i(TAG, "[$cameraId] Odak kilitlendi: LENS_FOCUS_DISTANCE=$manualFocusDistance")
-            } else {
-                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-            }
-
-            set(CaptureRequest.JPEG_ORIENTATION, currentDisplayRotationDegrees())
-        }
-
-        session.capture(
-            requestBuilder.build(),
-            object : CameraCaptureSession.CaptureCallback() {
-                override fun onCaptureStarted(
-                    s: CameraCaptureSession,
-                    request: CaptureRequest,
-                    timestamp: Long,
-                    frameNumber: Long,
-                ) {
-                    Log.d(TAG, "[$cameraId] onCaptureStarted frame=$frameNumber")
-                }
-
-                override fun onCaptureCompleted(
-                    s: CameraCaptureSession,
-                    request: CaptureRequest,
-                    result: TotalCaptureResult,
-                ) {
-                    Log.d(TAG, "[$cameraId] onCaptureCompleted frame=${result.frameNumber}")
-                }
-
-                override fun onCaptureFailed(
-                    s: CameraCaptureSession,
-                    request: CaptureRequest,
-                    failure: android.hardware.camera2.CaptureFailure,
-                ) {
-                    val msg = "[$cameraId] onCaptureFailed reason=${failure.reason} frame=${failure.frameNumber}"
-                    Log.e(TAG, msg)
-                    if (imageDeferred.isActive) {
-                        imageDeferred.completeExceptionally(IOException(msg))
-                    }
-                }
-            },
-            handler,
-        )
-
-        return imageDeferred.await()
-    }
 
     // ───────────────────────── 5. YUV_420_888 → NV21 → JPEG ─────────────────────────
 

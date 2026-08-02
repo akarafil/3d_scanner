@@ -159,27 +159,79 @@ class MultiLensCaptureOrchestrator(
         manualExposureTimeNs: Long? = null,
         manualFocusDistance: Float? = null,
     ): List<File> = withContext(Dispatchers.IO) {
+        val permissionGranted = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!permissionGranted) {
+            Log.e(TAG, "[$lensId] Kamera izni yok!")
+            _progress.value = CaptureProgress.FrameFailure(0, count, lensId, SecurityException("CAMERA permission missing"))
+            return@withContext emptyList<File>()
+        }
+
         val sessionId = activeSession?.sessionId ?: UUID.randomUUID()
         val files = mutableListOf<File>()
-        for (i in 0 until count) {
-            _progress.value = CaptureProgress.FrameStarted(i, count, lensId)
-            val file = captureAndStamp(
-                lensId = lensId,
-                sessionId = sessionId,
-                translation = translation,
-                rotation = rotation,
-                manualIso = manualIso,
-                manualExposureTimeNs = manualExposureTimeNs,
-                manualFocusDistance = manualFocusDistance
-            )
-            if (file != null) {
-                files.add(file)
-                _progress.value = CaptureProgress.FrameSuccess(i, count, lensId, file)
-            } else {
-                _progress.value =
-                    CaptureProgress.FrameFailure(i, count, lensId, IOException("frame $i failed after retries"))
+
+        val session = RawAuxCaptureSession(context, lensId, outputDir)
+        try {
+            Log.i(TAG, "[$lensId] Opening sticky camera session for burst of $count...")
+            session.open()
+            for (i in 0 until count) {
+                _progress.value = CaptureProgress.FrameStarted(i, count, lensId)
+                var attempt = 0
+                var file: File? = null
+                while (attempt <= MAX_RETRIES_PER_FRAME) {
+                    try {
+                        val raw = session.captureFrame(manualIso, manualExposureTimeNs, manualFocusDistance)
+                        val (w, h) = runCatching { readImageSize(raw) }.getOrDefault(Pair(0, 0))
+                        val lens = getAuxLensMap()[lensId]
+                        val stamped = exifWriter.stamp(
+                            jpegFile = raw,
+                            lensId = lensId,
+                            lens = lens,
+                            width = w,
+                            height = h,
+                            sessionId = sessionId
+                        )
+                        if (stamped != null) {
+                            activeSession?.let { scanSession ->
+                                val updatedSession = frameStore.appendFrame(
+                                    session = scanSession,
+                                    sourceJpeg = stamped,
+                                    lensId = lensId,
+                                    lensType = lens?.lensType?.name ?: "UNKNOWN",
+                                    focalMm = lens?.focalLengthMm ?: 0f,
+                                    translation = translation,
+                                    rotation = rotation
+                                )
+                                activeSession = updatedSession
+                            }
+                        }
+                        file = stamped
+                        break
+                    } catch (e: Exception) {
+                        Log.w(TAG, "[$lensId] Sticky capture attempt=$attempt failed: ${e.message}")
+                        attempt++
+                        if (attempt <= MAX_RETRIES_PER_FRAME) {
+                            delay(150L * attempt)
+                        }
+                    }
+                }
+
+                if (file != null) {
+                    files.add(file)
+                    _progress.value = CaptureProgress.FrameSuccess(i, count, lensId, file)
+                } else {
+                    _progress.value =
+                        CaptureProgress.FrameFailure(i, count, lensId, IOException("frame $i failed after retries"))
+                }
+                if (i < count - 1) delay(INTER_FRAME_GAP_MS)
             }
-            if (i < count - 1) delay(INTER_FRAME_GAP_MS)
+        } catch (e: Exception) {
+            Log.e(TAG, "[$lensId] Sticky session burst failed: ${e.message}", e)
+            _progress.value = CaptureProgress.FrameFailure(0, count, lensId, e)
+        } finally {
+            Log.i(TAG, "[$lensId] Closing sticky camera session.")
+            runCatching { session.close() }
         }
         _progress.value = CaptureProgress.BurstDone(files.toList())
         files.toList()
