@@ -102,13 +102,19 @@ fun MagicScannerApp() {
                 )
                 is Screen.Scan -> {
                     val application = LocalContext.current.applicationContext as android.app.Application
-                    val scanViewModel = remember(scr.session.sessionId) {
-                        ScanViewModel(
-                            application = application,
-                            sessionFrameStore = store,
-                            activeSession = scr.session
-                        )
-                    }
+                    val scanViewModel = androidx.lifecycle.viewmodel.compose.viewModel<ScanViewModel>(
+                        key = scr.session.sessionId.toString(),
+                        factory = object : androidx.lifecycle.ViewModelProvider.Factory {
+                            override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T {
+                                @Suppress("UNCHECKED_CAST")
+                                return ScanViewModel(
+                                    application = application,
+                                    sessionFrameStore = store,
+                                    activeSession = scr.session
+                                ) as T
+                            }
+                        }
+                    )
                     ScanScreen(
                         viewModel = scanViewModel,
                         onBack = { currentScreen = Screen.Home }

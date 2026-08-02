@@ -16,10 +16,6 @@ data class Point3D(
 class DepthToPointsUseCase {
 
     companion object {
-        private const val FX = 500f
-        private const val FY = 500f
-        private const val CX = 259f
-        private const val CY = 259f
         private const val STRIDE = 3 // Downsampling to keep memory and CPU low
     }
 
@@ -31,7 +27,11 @@ class DepthToPointsUseCase {
         width: Int,
         height: Int,
         pose: CameraPose?,
-        rgbBitmap: Bitmap
+        rgbBitmap: Bitmap,
+        fx: Float = 500f,
+        fy: Float = 500f,
+        cx: Float = 259f,
+        cy: Float = 259f
     ): List<Point3D> {
         val points = mutableListOf<Point3D>()
         val scaledRgb = Bitmap.createScaledBitmap(rgbBitmap, width, height, false)
@@ -50,8 +50,8 @@ class DepthToPointsUseCase {
                 // 1. Camera space projection
                 // Scale depth to representative meters (e.g. max range 2.5 meters)
                 val zCamera = depth * 2.5f 
-                val xCamera = (x - CX) * zCamera / FX
-                val yCamera = (y - CY) * zCamera / FY
+                val xCamera = (x - cx) * zCamera / fx
+                val yCamera = (y - cy) * zCamera / fy
 
                 // 2. Rotate vector using camera quaternion pose
                 val cameraPoint = floatArrayOf(xCamera, yCamera, zCamera)

@@ -359,10 +359,12 @@ class RawAuxCaptureSession(
         // UV Interleaved (NV21 formatında V önce, U sonra gelir)
         for (row in 0 until height / 2) {
             for (col in 0 until width / 2) {
-                // V byte
-                nv21[uvOffset++] = vBuf.get(row * uvRowStride + col * uvPixelStride)
-                // U byte
-                nv21[uvOffset++] = uBuf.get(row * uvRowStride + col * uvPixelStride)
+                val vIdx = row * uvRowStride + col * uvPixelStride
+                val uIdx = row * uvRowStride + col * uvPixelStride
+                val vVal = if (vIdx < vBuf.capacity()) vBuf.get(vIdx) else 0.toByte()
+                val uVal = if (uIdx < uBuf.capacity()) uBuf.get(uIdx) else 0.toByte()
+                nv21[uvOffset++] = vVal
+                nv21[uvOffset++] = uVal
             }
         }
 

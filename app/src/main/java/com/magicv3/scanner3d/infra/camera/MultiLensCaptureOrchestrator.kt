@@ -304,7 +304,7 @@ class MultiLensCaptureOrchestrator(
             manualFocusDistance = manualFocusDistance
         )
         return if (result.isSuccess) {
-            result.getOrNull()!!.also { Log.i(TAG, "[$lensId] frame saved on attempt=$attempt") }
+            result.getOrThrow().also { Log.i(TAG, "[$lensId] frame saved on attempt=$attempt") }
         } else {
             val err = result.exceptionOrNull()
             Log.w(TAG, "[$lensId] capture attempt=$attempt failed: ${err?.message}")

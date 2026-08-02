@@ -200,7 +200,7 @@ class SessionFrameStore(private val context: Context) {
         }
     }
 
-    private fun writeMeta(session: ScanSession) {
+    private suspend fun writeMeta(session: ScanSession) = withContext(Dispatchers.IO) {
         val framesArr = JSONArray()
         session.frames.forEach { f ->
             framesArr.put(JSONObject().apply {

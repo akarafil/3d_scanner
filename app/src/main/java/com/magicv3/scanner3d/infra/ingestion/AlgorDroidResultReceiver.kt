@@ -25,6 +25,14 @@ class AlgorDroidResultReceiver : BroadcastReceiver() {
     }
 
     override fun onReceive(context: Context, intent: Intent) {
+        if (android.os.Build.VERSION.SDK_INT >= 34) {
+            val sender = getSentFromPackage()
+            if (sender != null && sender != "com.algordroid.engine") {
+                Log.w(TAG, "Rejected broadcast from unauthorized sender: $sender")
+                return
+            }
+        }
+
         val sessionId = intent.getStringExtra(EXTRA_SESSION_ID) ?: return
 
         when (intent.action) {

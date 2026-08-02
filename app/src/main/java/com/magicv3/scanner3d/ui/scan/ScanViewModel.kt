@@ -284,6 +284,16 @@ class ScanViewModel(
             CameraPose(pose.translation, pose.rotationQuaternion)
         } else null
 
+        val intrinsics = if (frame.camera.trackingState == com.google.ar.core.TrackingState.TRACKING) {
+            val imageIntrinsics = frame.camera.imageIntrinsics
+            floatArrayOf(
+                imageIntrinsics.focalLength[0],
+                imageIntrinsics.focalLength[1],
+                imageIntrinsics.principalPoint[0],
+                imageIntrinsics.principalPoint[1]
+            )
+        } else null
+
         viewModelScope.launch(Dispatchers.Default) {
             try {
                 val width = cameraImage.width
@@ -310,8 +320,22 @@ class ScanViewModel(
                     val depthMap = depthEngine.infer(rotatedBitmap)
                     val inferenceTime = System.currentTimeMillis() - startTime
 
-                    // Generate world 3D points from depth map and pose
-                    val newPoints = depthToPointsUseCase.execute(depthMap, 518, 518, currentPose, rotatedBitmap)
+                    // Generate world 3D points from depth map, pose and dynamic intrinsics
+                    val newPoints = if (intrinsics != null) {
+                        depthToPointsUseCase.execute(
+                            depths = depthMap,
+                            width = 518,
+                            height = 518,
+                            pose = currentPose,
+                            rgbBitmap = rotatedBitmap,
+                            fx = intrinsics[0],
+                            fy = intrinsics[1],
+                            cx = intrinsics[2],
+                            cy = intrinsics[3]
+                        )
+                    } else {
+                        depthToPointsUseCase.execute(depthMap, 518, 518, currentPose, rotatedBitmap)
+                    }
                     synchronized(accumulatedPoints) {
                         if (accumulatedPoints.size < 300_000) {
                             accumulatedPoints.addAll(newPoints)
@@ -375,8 +399,12 @@ class ScanViewModel(
         var uvOffset = width * height
         for (row in 0 until height / 2) {
             for (col in 0 until width / 2) {
-                nv21[uvOffset++] = vBuffer.get(row * uvRowStride + col * uvPixelStride)
-                nv21[uvOffset++] = uBuffer.get(row * uvRowStride + col * uvPixelStride)
+                val vIdx = row * uvRowStride + col * uvPixelStride
+                val uIdx = row * uvRowStride + col * uvPixelStride
+                val vVal = if (vIdx < vBuffer.capacity()) vBuffer.get(vIdx) else 0.toByte()
+                val uVal = if (uIdx < uBuffer.capacity()) uBuffer.get(uIdx) else 0.toByte()
+                nv21[uvOffset++] = vVal
+                nv21[uvOffset++] = uVal
             }
         }
         return nv21
