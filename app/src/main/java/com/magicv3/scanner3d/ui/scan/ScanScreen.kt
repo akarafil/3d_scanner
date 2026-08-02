@@ -82,10 +82,6 @@ fun ScanScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    val cameraController = remember { CameraController(context, lifecycleOwner) }
-
-    var previewView by remember { mutableStateOf<PreviewView?>(null) }
 
     var captureState by remember { mutableStateOf(CaptureState.IDLE) }
     val captureScope = rememberCoroutineScope()
@@ -158,12 +154,6 @@ fun ScanScreen(
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        CameraPreviewSurface(
-            modifier = Modifier.fillMaxSize(),
-            onPreviewViewReady = { pv ->
-                previewView = pv
-            }
-        )
 
         AndroidView(
             factory = { arSurfaceView },
@@ -477,13 +467,5 @@ fun ScanScreen(
         else -> {}
     }
 
-    LaunchedEffect(previewView) {
-        val pv = previewView ?: return@LaunchedEffect
-        cameraController.initialize()
-        cameraController.bindPreview(pv)
-    }
 
-    DisposableEffect(Unit) {
-        onDispose { cameraController.unbind() }
-    }
 }

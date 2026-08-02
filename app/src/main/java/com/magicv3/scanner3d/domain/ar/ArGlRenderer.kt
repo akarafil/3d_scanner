@@ -26,17 +26,50 @@ class ArGlRenderer(
         private set
 
     private var cameraTextureId = -1
-    private var program = 0
+    private var pointCloudProgram = 0
+    private var backgroundProgram = 0
 
-    // Shader Handles
+    // Shader Handles (Point Cloud)
     private var positionHandle = 0
     private var mvpMatrixHandle = 0
     private var pointSizeHandle = 0
+
+    // Shader Handles (Background)
+    private var bgPositionHandle = 0
+    private var bgTexCoordHandle = 0
+    private var bgTextureHandle = 0
 
     // Matrix Buffers
     private val viewMatrix = FloatArray(16)
     private val projectionMatrix = FloatArray(16)
     private val mvpMatrix = FloatArray(16)
+
+    // Background Quad Geometry
+    private val QUAD_COORDS = floatArrayOf(
+        -1.0f, -1.0f, 0.0f,
+        -1.0f, +1.0f, 0.0f,
+        +1.0f, -1.0f, 0.0f,
+        +1.0f, +1.0f, 0.0f
+    )
+    private val TEX_COORDS = floatArrayOf(
+        0.0f, 1.0f,
+        0.0f, 0.0f,
+        1.0f, 1.0f,
+        1.0f, 0.0f
+    )
+
+    private val quadCoordsBuffer = ByteBuffer.allocateDirect(QUAD_COORDS.size * 4)
+        .order(ByteOrder.nativeOrder()).asFloatBuffer().apply {
+            put(QUAD_COORDS)
+            position(0)
+        }
+    private val texCoordsBuffer = ByteBuffer.allocateDirect(TEX_COORDS.size * 4)
+        .order(ByteOrder.nativeOrder()).asFloatBuffer().apply {
+            put(TEX_COORDS)
+            position(0)
+        }
+    private val transformedTexCoordsBuffer = ByteBuffer.allocateDirect(TEX_COORDS.size * 4)
+        .order(ByteOrder.nativeOrder()).asFloatBuffer()
 
     // GL Thread Güvenli Durum Bayrağı
     @Volatile
@@ -44,11 +77,11 @@ class ArGlRenderer(
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         GLES20.glClearColor(0.0f, 0.0f, 0.0f, 0.0f) // Transparan arka plan
-        
+
         // 1. ARCore Kamera Dokusunu OES Formatında Oluştur
         cameraTextureId = createOesTexture()
 
-        // 2. Point Cloud Shader Programını Derle
+        // 2. Shader Programlarını Derle
         initShaders()
 
         // 3. ARCore Oturumunu GL Thread'i İçinde Başlat/Tekrar Bağla
@@ -85,10 +118,13 @@ class ArGlRenderer(
         try {
             // ARCore update() metodu ARTIK GÜVENLE GL THREAD'İ İÇİNDE ÇAĞRILIYOR
             val frame = arSession?.update() ?: return
-            val camera = frame.camera
 
+            // 1. Kamera Feed'ini Arka Plana Çiz (CameraX Preview yerine)
+            drawBackground(frame)
+
+            val camera = frame.camera
             if (camera.trackingState == TrackingState.TRACKING) {
-                // 1. Anlık 6-DoF Pozisyonunu Al ve Üst Katmana Bildir
+                // 2. Anlık 6-DoF Pozisyonunu Al ve Üst Katmana Bildir
                 val pose = camera.pose
                 onPoseUpdated(
                     CameraPose(
@@ -97,12 +133,12 @@ class ArGlRenderer(
                     )
                 )
 
-                // 2. Kamera Matrislerini Çek (Projection * View)
+                // 3. Kamera Matrislerini Çek (Projection * View)
                 camera.getProjectionMatrix(projectionMatrix, 0, 0.1f, 100.0f)
                 camera.getViewMatrix(viewMatrix, 0)
                 android.opengl.Matrix.multiplyMM(mvpMatrix, 0, projectionMatrix, 0, viewMatrix, 0)
 
-                // 3. Nokta Bulutunu (Point Cloud) GPU Üzerinde Çiz
+                // 4. Nokta Bulutunu (Point Cloud) GPU Üzerinde Çiz
                 val pointCloud = frame.acquirePointCloud()
                 drawPointCloud(pointCloud)
                 pointCloud.release()
@@ -112,12 +148,42 @@ class ArGlRenderer(
         }
     }
 
+    private fun drawBackground(frame: com.google.ar.core.Frame) {
+        // Ekran geometrisi değiştikçe doku koordinatlarını dönüştür
+        if (frame.hasDisplayGeometryChanged()) {
+            texCoordsBuffer.position(0)
+            transformedTexCoordsBuffer.position(0)
+            frame.transformDisplayUvCoords(texCoordsBuffer, transformedTexCoordsBuffer)
+        }
+
+        GLES20.glUseProgram(backgroundProgram)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTextureId)
+        GLES20.glUniform1i(bgTextureHandle, 0)
+
+        // Pozisyonları ata
+        quadCoordsBuffer.position(0)
+        GLES20.glVertexAttribPointer(bgPositionHandle, 3, GLES20.GL_FLOAT, false, 0, quadCoordsBuffer)
+        GLES20.glEnableVertexAttribArray(bgPositionHandle)
+
+        // Doku koordinatlarını ata
+        transformedTexCoordsBuffer.position(0)
+        GLES20.glVertexAttribPointer(bgTexCoordHandle, 2, GLES20.GL_FLOAT, false, 0, transformedTexCoordsBuffer)
+        GLES20.glEnableVertexAttribArray(bgTexCoordHandle)
+
+        // Çiz
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+        GLES20.glDisableVertexAttribArray(bgPositionHandle)
+        GLES20.glDisableVertexAttribArray(bgTexCoordHandle)
+    }
+
     private fun drawPointCloud(pointCloud: PointCloud) {
         val pointsBuffer = pointCloud.points ?: return
         val numPoints = pointsBuffer.remaining() / 4
         if (numPoints <= 0) return
 
-        GLES20.glUseProgram(program)
+        GLES20.glUseProgram(pointCloudProgram)
 
         // MVP Matrix Yükle
         GLES20.glUniformMatrix4fv(mvpMatrixHandle, 1, false, mvpMatrix, 0)
@@ -146,7 +212,8 @@ class ArGlRenderer(
     }
 
     private fun initShaders() {
-        val vertexShaderCode = """
+        // --- 1. Point Cloud Shader Programı ---
+        val pcVertexShaderCode = """
             uniform mat4 uMVPMatrix;
             uniform float uPointSize;
             attribute vec4 aPosition;
@@ -158,7 +225,7 @@ class ArGlRenderer(
             }
         """.trimIndent()
 
-        val fragmentShaderCode = """
+        val pcFragmentShaderCode = """
             precision mediump float;
             varying float vConfidence;
             void main() {
@@ -168,24 +235,63 @@ class ArGlRenderer(
             }
         """.trimIndent()
 
-        val vShader = loadShader(GLES20.GL_VERTEX_SHADER, vertexShaderCode)
-        val fShader = loadShader(GLES20.GL_FRAGMENT_SHADER, fragmentShaderCode)
+        val pcVShader = loadShader(GLES20.GL_VERTEX_SHADER, pcVertexShaderCode)
+        val pcFShader = loadShader(GLES20.GL_FRAGMENT_SHADER, pcFragmentShaderCode)
 
-        program = GLES20.glCreateProgram().apply {
-            GLES20.glAttachShader(this, vShader)
-            GLES20.glAttachShader(this, fShader)
+        pointCloudProgram = GLES20.glCreateProgram().apply {
+            GLES20.glAttachShader(this, pcVShader)
+            GLES20.glAttachShader(this, pcFShader)
             GLES20.glLinkProgram(this)
         }
 
-        positionHandle = GLES20.glGetAttribLocation(program, "aPosition")
-        mvpMatrixHandle = GLES20.glGetUniformLocation(program, "uMVPMatrix")
-        pointSizeHandle = GLES20.glGetUniformLocation(program, "uPointSize")
+        positionHandle = GLES20.glGetAttribLocation(pointCloudProgram, "aPosition")
+        mvpMatrixHandle = GLES20.glGetUniformLocation(pointCloudProgram, "uMVPMatrix")
+        pointSizeHandle = GLES20.glGetUniformLocation(pointCloudProgram, "uPointSize")
+
+        // --- 2. Kamera Arka Plan Shader Programı ---
+        val bgVertexShaderCode = """
+            attribute vec4 aPosition;
+            attribute vec2 aTexCoord;
+            varying vec2 vTexCoord;
+            void main() {
+               gl_Position = aPosition;
+               vTexCoord = aTexCoord;
+            }
+        """.trimIndent()
+
+        val bgFragmentShaderCode = """
+            #extension GL_OES_EGL_image_external : require
+            precision mediump float;
+            varying vec2 vTexCoord;
+            uniform samplerExternalOES uTexture;
+            void main() {
+               gl_FragColor = texture2D(uTexture, vTexCoord);
+            }
+        """.trimIndent()
+
+        val bgVShader = loadShader(GLES20.GL_VERTEX_SHADER, bgVertexShaderCode)
+        val bgFShader = loadShader(GLES20.GL_FRAGMENT_SHADER, bgFragmentShaderCode)
+
+        backgroundProgram = GLES20.glCreateProgram().apply {
+            GLES20.glAttachShader(this, bgVShader)
+            GLES20.glAttachShader(this, bgFShader)
+            GLES20.glLinkProgram(this)
+        }
+
+        bgPositionHandle = GLES20.glGetAttribLocation(backgroundProgram, "aPosition")
+        bgTexCoordHandle = GLES20.glGetAttribLocation(backgroundProgram, "aTexCoord")
+        bgTextureHandle = GLES20.glGetUniformLocation(backgroundProgram, "uTexture")
     }
 
     private fun loadShader(type: Int, shaderCode: String): Int {
         return GLES20.glCreateShader(type).also { shader ->
             GLES20.glShaderSource(shader, shaderCode)
             GLES20.glCompileShader(shader)
+            val compiled = IntArray(1)
+            GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0)
+            if (compiled[0] == 0) {
+                Log.e("ArGlRenderer", "Shader compilation error: " + GLES20.glGetShaderInfoLog(shader))
+            }
         }
     }
 
