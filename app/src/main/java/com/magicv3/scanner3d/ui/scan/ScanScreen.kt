@@ -55,10 +55,7 @@ import com.magicv3.scanner3d.domain.model.ScanStatus
 import com.magicv3.scanner3d.domain.ar.CameraPose
 import com.magicv3.scanner3d.ui.scan.ArPointCloudSurfaceView
 import androidx.compose.ui.viewinterop.AndroidView
-import com.magicv3.scanner3d.infra.camera.CameraController
-import com.magicv3.scanner3d.infra.camera.CameraLensCatalog
 import kotlinx.coroutines.isActive
-import com.magicv3.scanner3d.infra.camera.AuxProbe
 import com.magicv3.scanner3d.infra.camera.RawAuxCaptureSession
 import com.magicv3.scanner3d.infra.camera.MultiLensCaptureOrchestrator
 import com.magicv3.scanner3d.infra.storage.SessionFrameStore
@@ -138,16 +135,7 @@ fun ScanScreen(
         orchestrator.bindSession(activeSession)
     }
 
-    // ===== Faz 2.0 + 2.0.5 — Geçici catalog dump + aux probe =====
-    LaunchedEffect(Unit) {
-        runCatching {
-            CameraLensCatalog(context).enumerateLenses()
-            AuxProbe(context).probe()
-        }.onFailure {
-            Log.e("ScanScreen", "Camera enumeration/probe failed", it)
-        }
-    }
-    // ===== Geçici dump sonu (Faz 2.4'te kaldırılacak) =====
+
 
     fun triggerZipShare(session: ScanSession) {
         captureScope.launch {
