@@ -119,7 +119,9 @@ fun ScanScreen(
 
     LaunchedEffect(Unit) {
         while (isActive) {
-            arTracker.updateFrame()
+            if (!arTracker.isPaused) {
+                arTracker.updateFrame()
+            }
             delay(16)
         }
     }
