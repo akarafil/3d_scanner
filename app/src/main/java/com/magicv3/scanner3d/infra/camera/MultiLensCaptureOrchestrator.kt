@@ -99,7 +99,12 @@ class MultiLensCaptureOrchestrator(
         return Pair(options.outWidth, options.outHeight)
     }
 
-    private suspend fun captureAndStamp(lensId: String, sessionId: UUID): File? {
+    private suspend fun captureAndStamp(
+        lensId: String,
+        sessionId: UUID,
+        translation: FloatArray? = null,
+        rotation: FloatArray? = null
+    ): File? {
         val raw = captureWithRetry(lensId, attempt = 0) ?: return null
         val (w, h) = runCatching { readImageSize(raw) }.getOrDefault(Pair(0, 0))
         val lens = getAuxLensMap()[lensId]
@@ -118,7 +123,9 @@ class MultiLensCaptureOrchestrator(
                     sourceJpeg = stamped,
                     lensId = lensId,
                     lensType = lens?.lensType?.name ?: "UNKNOWN",
-                    focalMm = lens?.focalLengthMm ?: 0f
+                    focalMm = lens?.focalLengthMm ?: 0f,
+                    translation = translation,
+                    rotation = rotation
                 )
                 activeSession = updatedSession
             }
@@ -133,12 +140,14 @@ class MultiLensCaptureOrchestrator(
     suspend fun captureBurst(
         lensId: String = DEFAULT_LENS,
         count: Int = DEFAULT_BURST,
+        translation: FloatArray? = null,
+        rotation: FloatArray? = null
     ): List<File> = withContext(Dispatchers.IO) {
         val sessionId = activeSession?.sessionId ?: UUID.randomUUID()
         val files = mutableListOf<File>()
         for (i in 0 until count) {
             _progress.value = CaptureProgress.FrameStarted(i, count, lensId)
-            val file = captureAndStamp(lensId, sessionId)
+            val file = captureAndStamp(lensId, sessionId, translation, rotation)
             if (file != null) {
                 files.add(file)
                 _progress.value = CaptureProgress.FrameSuccess(i, count, lensId, file)
@@ -161,12 +170,14 @@ class MultiLensCaptureOrchestrator(
             RawAuxCaptureSession.AUX_TELEPHOTO_ID,
             RawAuxCaptureSession.AUX_ULTRAWIDE_ID,
         ),
+        translation: FloatArray? = null,
+        rotation: FloatArray? = null
     ): Map<String, File> = withContext(Dispatchers.IO) {
         val sessionId = activeSession?.sessionId ?: UUID.randomUUID()
         val result = LinkedHashMap<String, File>()
         for (id in lensIds) {
             _progress.value = CaptureProgress.FrameStarted(result.size, lensIds.size, id)
-            val file = captureAndStamp(id, sessionId)
+            val file = captureAndStamp(id, sessionId, translation, rotation)
             if (file != null) {
                 result[id] = file
                 _progress.value = CaptureProgress.FrameSuccess(result.size - 1, lensIds.size, id, file)

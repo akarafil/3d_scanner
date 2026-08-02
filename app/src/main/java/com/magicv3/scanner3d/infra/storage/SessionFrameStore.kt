@@ -107,6 +107,8 @@ class SessionFrameStore(private val context: Context) {
         lensId: String,
         lensType: String,
         focalMm: Float,
+        translation: FloatArray? = null,
+        rotation: FloatArray? = null,
     ): ScanSession = withContext(Dispatchers.IO) {
         // [Phase 2.5] Guaranteed-unique filename: frame_{seqNo padded 3}_{lensId}_{capturedAtMs}.jpg
         val seqNo = session.frames.size + 1
@@ -130,6 +132,8 @@ class SessionFrameStore(private val context: Context) {
             focalMm = focalMm,
             bytes = target.length(),
             capturedAtMs = capturedMs,
+            translation = translation,
+            rotation = rotation,
         )
         // meta.json'a ekle → atomic rewrite
         val updated = session.copy(
@@ -191,6 +195,8 @@ class SessionFrameStore(private val context: Context) {
                 put("focalMm", f.focalMm.toDouble())
                 put("bytes", f.bytes)
                 put("capturedAtMs", f.capturedAtMs)
+                f.translation?.let { put("translation", JSONArray(it)) }
+                f.rotation?.let { put("rotation", JSONArray(it)) }
             })
         }
         val root = JSONObject().apply {

@@ -52,6 +52,10 @@ data class ScanSession(
                 val framesArr = root.optJSONArray("frames") ?: JSONArray()
                 val frames = (0 until framesArr.length()).map { i ->
                     val f = framesArr.getJSONObject(i)
+                    val transArr = f.optJSONArray("translation")
+                    val rotArr = f.optJSONArray("rotation")
+                    val translation = if (transArr != null) FloatArray(transArr.length()) { idx -> transArr.getDouble(idx).toFloat() } else null
+                    val rotation = if (rotArr != null) FloatArray(rotArr.length()) { idx -> rotArr.getDouble(idx).toFloat() } else null
                     ScanFrame(
                         file = File(folder, "frames/${f.getString("file")}"),
                         lensId = f.getString("lensId"),
@@ -59,6 +63,8 @@ data class ScanSession(
                         focalMm = f.getDouble("focalMm").toFloat(),
                         bytes = f.getLong("bytes"),
                         capturedAtMs = f.getLong("capturedAtMs"),
+                        translation = translation,
+                        rotation = rotation,
                     )
                 }
 
@@ -87,4 +93,6 @@ data class ScanFrame(
     val focalMm: Float,
     val bytes: Long,
     val capturedAtMs: Long,
+    val translation: FloatArray? = null,
+    val rotation: FloatArray? = null,
 )

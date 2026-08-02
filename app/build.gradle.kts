@@ -78,6 +78,9 @@ dependencies {
     // ExifInterface for JPEG metadata stamping (SfM photogrammetry)
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
+    // ARCore SDK for Live Point Cloud and camera pose tracking
+    implementation("com.google.ar:core:1.41.0")
+
     // Testing
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")

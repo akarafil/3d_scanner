@@ -51,6 +51,13 @@ class ManifestGenerator(private val context: Context) {
                     put("bytes", frame.bytes)
                     put("capturedAtMs", frame.capturedAtMs)
 
+                    if (frame.translation != null && frame.rotation != null) {
+                        put("pose", JSONObject().apply {
+                            put("translation", JSONArray(frame.translation))
+                            put("rotation_quaternion", JSONArray(frame.rotation))
+                        })
+                    }
+
                     // EXIF metadata ekstraksiyonu
                     runCatching {
                         val exif = ExifInterface(frame.file.absolutePath)
