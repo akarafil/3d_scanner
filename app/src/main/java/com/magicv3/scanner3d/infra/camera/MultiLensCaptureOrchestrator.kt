@@ -1,13 +1,18 @@
 package com.magicv3.scanner3d.infra.camera
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.util.Log
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
@@ -65,6 +70,7 @@ class MultiLensCaptureOrchestrator(
     val progress: StateFlow<CaptureProgress> = _progress.asStateFlow()
 
     private val exifWriter = AuxExifWriter()
+    private val mutex = Mutex()
     private var auxLensMap: Map<String, CameraLens>? = null
 
     var activeSession: ScanSession? = null
@@ -79,12 +85,10 @@ class MultiLensCaptureOrchestrator(
     }
 
     private suspend fun getAuxLensMap(): Map<String, CameraLens> = withContext(Dispatchers.IO) {
-        synchronized(this@MultiLensCaptureOrchestrator) {
-            auxLensMap
-        } ?: run {
-            val candidateIds = listOf("0", "1", "2", "3", "4", "5", "8", "9")
-            val resolved = AuxLensCatalog(context).resolve(candidateIds)
-            synchronized(this@MultiLensCaptureOrchestrator) {
+        auxLensMap ?: mutex.withLock {
+            auxLensMap ?: run {
+                val candidateIds = listOf("0", "1", "2", "3", "4", "5", "8", "9")
+                val resolved = AuxLensCatalog(context).resolve(candidateIds)
                 auxLensMap = resolved
                 resolved
             }
@@ -229,6 +233,14 @@ class MultiLensCaptureOrchestrator(
         manualExposureTimeNs: Long? = null,
         manualFocusDistance: Float? = null,
     ): File? {
+        val permissionGranted = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!permissionGranted) {
+            Log.e(TAG, "[$lensId] Kamera izni yok!")
+            return null
+        }
+
         if (attempt > MAX_RETRIES_PER_FRAME) {
             Log.w(TAG, "[$lensId] giving up after $attempt retries")
             return null
@@ -246,7 +258,13 @@ class MultiLensCaptureOrchestrator(
             Log.w(TAG, "[$lensId] capture attempt=$attempt failed: ${err?.message}")
             // OnError=2 is transient for recently-closed sessions — short backoff before retry.
             delay(150L * (attempt + 1))
-            captureWithRetry(lensId, attempt + 1)
+            captureWithRetry(
+                lensId = lensId,
+                attempt = attempt + 1,
+                manualIso = manualIso,
+                manualExposureTimeNs = manualExposureTimeNs,
+                manualFocusDistance = manualFocusDistance
+            )
         }
     }
 }

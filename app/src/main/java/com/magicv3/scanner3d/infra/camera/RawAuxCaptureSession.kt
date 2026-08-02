@@ -315,24 +315,28 @@ class RawAuxCaptureSession(
         val uBuf: ByteBuffer = uPlane.buffer
         val vBuf: ByteBuffer = vPlane.buffer
 
-        val ySize = yBuf.remaining()
-        val uSize = uBuf.remaining()
-        val vSize = vBuf.remaining()
+        // NV21 = Y (width * height bytes) + VU interleaved (width * height / 2 bytes)
+        val nv21 = ByteArray(width * height * 3 / 2)
 
-        val nv21 = ByteArray(ySize + uSize + vSize)
+        val yRowStride = yPlane.rowStride
+        // Y Plane: rowStride değerine göre satır satır kopyalama yapıyoruz (rowStride != width olabilir)
+        for (row in 0 until height) {
+            yBuf.position(row * yRowStride)
+            yBuf.get(nv21, row * width, width)
+        }
 
-        yBuf.get(nv21, 0, ySize)
+        val uvRowStride = vPlane.rowStride
+        val uvPixelStride = vPlane.pixelStride
+        var uvOffset = width * height
 
-        val uvPixelStride = uPlane.pixelStride
-        val uvRowStride = uPlane.rowStride
-
-        if (uvPixelStride == 2) {
-            val vBufCopy = ByteArray(vSize)
-            vBuf.get(vBufCopy)
-            System.arraycopy(vBufCopy, 0, nv21, ySize, vSize)
-        } else {
-            vBuf.get(nv21, ySize, vSize)
-            uBuf.get(nv21, ySize + vSize, uSize)
+        // UV Interleaved (NV21 formatında V önce, U sonra gelir)
+        for (row in 0 until height / 2) {
+            for (col in 0 until width / 2) {
+                // V byte
+                nv21[uvOffset++] = vBuf.get(row * uvRowStride + col * uvPixelStride)
+                // U byte
+                nv21[uvOffset++] = uBuf.get(row * uvRowStride + col * uvPixelStride)
+            }
         }
 
         val yuvImage = android.graphics.YuvImage(nv21, ImageFormat.NV21, width, height, null)
