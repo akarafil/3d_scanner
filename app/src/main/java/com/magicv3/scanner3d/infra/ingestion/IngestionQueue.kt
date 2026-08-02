@@ -87,7 +87,7 @@ class IngestionQueue private constructor(
      */
     fun markComplete(sessionId: String, meshUri: Uri) {
         scope.launch {
-            _queueState.value = IngestionState.Transferring(sessionId, File(context.cacheDir, "temp_mesh")) // placeholder state
+            _queueState.value = IngestionState.Reconstructing(sessionId, 100)
             val meshFile = meshRepository.importMesh(sessionId, meshUri)
             if (meshFile != null) {
                 _queueState.value = IngestionState.Reconstructed(sessionId, meshFile)
