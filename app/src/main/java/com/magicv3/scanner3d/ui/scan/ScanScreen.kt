@@ -1,12 +1,18 @@
 package com.magicv3.scanner3d.ui.scan
 
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -26,8 +32,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -55,6 +69,12 @@ fun ScanScreen(
     val openedSession by viewModel.openedSession.collectAsStateWithLifecycle()
     val zipShareState by viewModel.zipShareState.collectAsStateWithLifecycle()
 
+    // AI states
+    val aiPreviewMode by viewModel.aiPreviewMode.collectAsStateWithLifecycle()
+    val aiStats by viewModel.aiStats.collectAsStateWithLifecycle()
+    val depthHeatmap by viewModel.depthHeatmap.collectAsStateWithLifecycle()
+    val yoloDetections by viewModel.yoloDetections.collectAsStateWithLifecycle()
+
     val progressState by viewModel.orchestrator.progress.collectAsStateWithLifecycle()
     val ingestionState by viewModel.ingestionQueue.queueState.collectAsStateWithLifecycle()
 
@@ -66,7 +86,11 @@ fun ScanScreen(
     }
 
     DisposableEffect(Unit) {
+        arSurfaceView.renderer.onFrameAvailable = { frame ->
+            viewModel.onFrameAvailable(frame)
+        }
         onDispose {
+            arSurfaceView.renderer.onFrameAvailable = null
             arSurfaceView.onDestroy()
         }
     }
@@ -77,12 +101,63 @@ fun ScanScreen(
             modifier = Modifier.fillMaxSize()
         )
 
+        // YOLOv8 Bounding Boxes Canvas Overlay
+        if (aiPreviewMode == AIPreviewMode.YOLO) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val canvasW = size.width
+                val canvasH = size.height
+
+                yoloDetections.forEach { det ->
+                    val rect = det.boundingBox
+                    val left = rect.left * canvasW
+                    val top = rect.top * canvasH
+                    val right = rect.right * canvasW
+                    val bottom = rect.bottom * canvasH
+
+                    // Draw cyan stroke box
+                    drawRect(
+                        color = Color.Cyan,
+                        topLeft = Offset(left, top),
+                        size = Size(right - left, bottom - top),
+                        style = Stroke(width = 3.dp.toPx())
+                    )
+
+                    // Draw label text
+                    val label = "Target Object (${(det.confidence * 100).toInt()}%)"
+                    val paint = android.graphics.Paint().apply {
+                        color = android.graphics.Color.CYAN
+                        textSize = 38f
+                        isAntiAlias = true
+                        typeface = android.graphics.Typeface.DEFAULT_BOLD
+                    }
+                    drawIntoCanvas { canvas ->
+                        canvas.nativeCanvas.drawText(label, left + 8f, top + 42f, paint)
+                    }
+                }
+            }
+        }
+
         SystemHud(
             context = context,
             modifier = Modifier
                 .padding(8.dp)
                 .align(Alignment.TopStart)
         )
+
+        // AI Stats HUD
+        aiStats?.let { stats ->
+            Text(
+                text = "⚡ $stats",
+                color = Color.Yellow,
+                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = 12.dp, top = 96.dp)
+                    .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            )
+        }
 
         // Toggle Mode Selector (TopCenter)
         Box(
@@ -118,6 +193,45 @@ fun ScanScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.labelMedium
                 )
+            }
+        }
+
+        // AI Mode Toggle Row (TopCenter under main mode toggle)
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 72.dp)
+                .background(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                    shape = RoundedCornerShape(20.dp)
+                )
+                .border(
+                    width = 1.dp,
+                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+                    shape = RoundedCornerShape(20.dp)
+                )
+                .padding(horizontal = 12.dp, vertical = 6.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                listOf(
+                    AIPreviewMode.NONE to "AI: OFF",
+                    AIPreviewMode.DEPTH to "DEPTH",
+                    AIPreviewMode.YOLO to "YOLOv8"
+                ).forEach { (modeOpt, label) ->
+                    val isSelected = aiPreviewMode == modeOpt
+                    Text(
+                        text = label,
+                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier
+                            .clickable { viewModel.setAiPreviewMode(modeOpt) }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
             }
         }
 
@@ -182,6 +296,34 @@ fun ScanScreen(
                     .align(Alignment.CenterEnd)
                     .padding(end = 16.dp)
             )
+        }
+
+        // Floating Depth Heatmap Picture-in-Picture overlay (BottomLeft)
+        if (aiPreviewMode == AIPreviewMode.DEPTH) {
+            depthHeatmap?.let { bitmap ->
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 24.dp, bottom = 48.dp)
+                        .size(130.dp)
+                        .background(
+                            color = Color.Black,
+                            shape = RoundedCornerShape(12.dp)
+                        )
+                        .border(
+                            width = 1.5.dp,
+                            color = MaterialTheme.colorScheme.primary,
+                            shape = RoundedCornerShape(12.dp)
+                        )
+                ) {
+                    Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = "Depth Map",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                }
+            }
         }
 
         // Capture Button

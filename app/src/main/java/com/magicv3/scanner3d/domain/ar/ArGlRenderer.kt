@@ -25,6 +25,8 @@ class ArGlRenderer(
     var arSession: Session? = null
         private set
 
+    var onFrameAvailable: ((com.google.ar.core.Frame) -> Unit)? = null
+
     private var cameraTextureId = -1
     private var pointCloudProgram = 0
     private var backgroundProgram = 0
@@ -121,6 +123,8 @@ class ArGlRenderer(
 
             // 1. Kamera Feed'ini Arka Plana Çiz (CameraX Preview yerine)
             drawBackground(frame)
+
+            onFrameAvailable?.invoke(frame)
 
             val camera = frame.camera
             if (camera.trackingState == TrackingState.TRACKING) {

@@ -45,6 +45,9 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+    aaptOptions {
+        noCompress("tflite", "lite")
+    }
 }
 
 dependencies {
@@ -80,6 +83,12 @@ dependencies {
 
     // ARCore SDK for Live Point Cloud and camera pose tracking
     implementation("com.google.ar:core:1.41.0")
+
+    // TensorFlow Lite (LiteRT) dependencies for On-Device AI models
+    val tfliteVersion = "2.14.0"
+    implementation("org.tensorflow:tensorflow-lite:$tfliteVersion")
+    implementation("org.tensorflow:tensorflow-lite-gpu:$tfliteVersion")
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 
     // Testing
     testImplementation("junit:junit:4.13.2")

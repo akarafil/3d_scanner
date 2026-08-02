@@ -1,0 +1,1 @@
+AI model folder. Place depth_anything_small.tflite and yolov8n.tflite here.

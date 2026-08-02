@@ -1,6 +1,8 @@
 package com.magicv3.scanner3d.ui.scan
 
 import android.app.Application
+import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
@@ -8,18 +10,27 @@ import androidx.lifecycle.viewModelScope
 import com.magicv3.scanner3d.domain.ar.CameraPose
 import com.magicv3.scanner3d.domain.model.ScanSession
 import com.magicv3.scanner3d.domain.model.ScanStatus
+import com.magicv3.scanner3d.infra.ai.DepthInferenceEngine
+import com.magicv3.scanner3d.infra.ai.YoloInferenceEngine
 import com.magicv3.scanner3d.infra.camera.MultiLensCaptureOrchestrator
 import com.magicv3.scanner3d.infra.camera.RawAuxCaptureSession
 import com.magicv3.scanner3d.infra.ingestion.IngestionQueue
 import com.magicv3.scanner3d.infra.storage.SessionFrameStore
 import com.magicv3.scanner3d.infra.storage.ZipExporter
 import com.magicv3.scanner3d.ui.capture.CaptureState
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.io.File
+
+enum class AIPreviewMode {
+    NONE,
+    DEPTH,
+    YOLO
+}
 
 class ScanViewModel(
     application: Application,
@@ -31,6 +42,10 @@ class ScanViewModel(
     val orchestrator = MultiLensCaptureOrchestrator(context, sessionFrameStore)
     val ingestionQueue = IngestionQueue.getInstance(context)
     private val zipExporter = ZipExporter(context)
+
+    // AI Engines
+    private val depthEngine = DepthInferenceEngine(context)
+    private val yoloEngine = YoloInferenceEngine(context)
 
     // State flows
     private val _captureState = MutableStateFlow(CaptureState.IDLE)
@@ -68,6 +83,21 @@ class ScanViewModel(
 
     private val _zipShareState = MutableStateFlow<ZipShareState>(ZipShareState.Idle)
     val zipShareState: StateFlow<ZipShareState> = _zipShareState.asStateFlow()
+
+    // AI States
+    private val _aiPreviewMode = MutableStateFlow(AIPreviewMode.NONE)
+    val aiPreviewMode: StateFlow<AIPreviewMode> = _aiPreviewMode.asStateFlow()
+
+    private val _aiStats = MutableStateFlow<String?>(null)
+    val aiStats: StateFlow<String?> = _aiStats.asStateFlow()
+
+    private val _depthHeatmap = MutableStateFlow<Bitmap?>(null)
+    val depthHeatmap: StateFlow<Bitmap?> = _depthHeatmap.asStateFlow()
+
+    private val _yoloDetections = MutableStateFlow<List<YoloInferenceEngine.Detection>>(emptyList())
+    val yoloDetections: StateFlow<List<YoloInferenceEngine.Detection>> = _yoloDetections.asStateFlow()
+
+    private var isAiProcessing = false
 
     init {
         viewModelScope.launch {
@@ -107,6 +137,15 @@ class ScanViewModel(
         _openedSession.value = session
     }
 
+    fun setAiPreviewMode(mode: AIPreviewMode) {
+        _aiPreviewMode.value = mode
+        if (mode == AIPreviewMode.NONE) {
+            _depthHeatmap.value = null
+            _yoloDetections.value = emptyList()
+            _aiStats.value = null
+        }
+    }
+
     fun resetZipShareState() {
         _zipShareState.value = ZipShareState.Idle
     }
@@ -142,6 +181,120 @@ class ScanViewModel(
         ingestionQueue.resetToIdle()
     }
 
+    fun onFrameAvailable(frame: com.google.ar.core.Frame) {
+        if (isAiProcessing || _aiPreviewMode.value == AIPreviewMode.NONE) return
+
+        val cameraImage = runCatching { frame.acquireCameraImage() }.getOrNull() ?: return
+        isAiProcessing = true
+
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                val width = cameraImage.width
+                val height = cameraImage.height
+
+                // Synchronously copy YUV planes to NV21 ByteArray
+                val nv21Bytes = imageToNv21(cameraImage)
+                cameraImage.close() // Release buffer to ARCore immediately!
+
+                // Asynchronously decode NV21 image to Bitmap
+                val yuvImage = android.graphics.YuvImage(nv21Bytes, android.graphics.ImageFormat.NV21, width, height, null)
+                val out = java.io.ByteArrayOutputStream()
+                yuvImage.compressToJpeg(android.graphics.Rect(0, 0, width, height), 80, out)
+                val jpegBytes = out.toByteArray()
+                val bitmap = android.graphics.BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
+
+                // Rotate bitmap to portrait
+                val rotatedBitmap = rotateBitmap(bitmap, 90f)
+
+                val mode = _aiPreviewMode.value
+                val startTime = System.currentTimeMillis()
+
+                if (mode == AIPreviewMode.DEPTH) {
+                    val depthMap = depthEngine.infer(rotatedBitmap)
+                    val inferenceTime = System.currentTimeMillis() - startTime
+                    _aiStats.value = "Depth: ${inferenceTime}ms, ACCEL: ${if (depthEngine.isNpuOrGpuAccelerated) "✓" else "x"}"
+
+                    val heatmap = depthToColormap(depthMap, 518, 518)
+                    _depthHeatmap.value = heatmap
+                } else if (mode == AIPreviewMode.YOLO) {
+                    val detections = yoloEngine.infer(rotatedBitmap)
+                    val inferenceTime = System.currentTimeMillis() - startTime
+                    _aiStats.value = "YOLOv8: ${inferenceTime}ms, ACCEL: ${if (yoloEngine.isNpuOrGpuAccelerated) "✓" else "x"}"
+
+                    _yoloDetections.value = detections
+                }
+            } catch (e: Exception) {
+                Log.e("ScanViewModel", "Error in AI Frame Pipeline: ${e.message}", e)
+                runCatching { cameraImage.close() }
+            } finally {
+                isAiProcessing = false
+            }
+        }
+    }
+
+    private fun imageToNv21(image: android.media.Image): ByteArray {
+        val width = image.width
+        val height = image.height
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+
+        val yBuffer = yPlane.buffer
+        val uBuffer = uPlane.buffer
+        val vBuffer = vPlane.buffer
+
+        val nv21 = ByteArray(width * height * 3 / 2)
+
+        val yRowStride = yPlane.rowStride
+        val yPixelStride = yPlane.pixelStride
+        var pos = 0
+
+        // Copy Y channel
+        for (row in 0 until height) {
+            yBuffer.position(row * yRowStride)
+            if (yPixelStride == 1) {
+                yBuffer.get(nv21, pos, width)
+                pos += width
+            } else {
+                for (col in 0 until width) {
+                    nv21[pos++] = yBuffer.get(row * yRowStride + col * yPixelStride)
+                }
+            }
+        }
+
+        // Copy UV channel (interleaved V then U)
+        val uvRowStride = vPlane.rowStride
+        val uvPixelStride = vPlane.pixelStride
+        var uvOffset = width * height
+        for (row in 0 until height / 2) {
+            for (col in 0 until width / 2) {
+                nv21[uvOffset++] = vBuffer.get(row * uvRowStride + col * uvPixelStride)
+                nv21[uvOffset++] = uBuffer.get(row * uvRowStride + col * uvPixelStride)
+            }
+        }
+        return nv21
+    }
+
+    private fun rotateBitmap(source: Bitmap, angle: Float): Bitmap {
+        val matrix = Matrix().apply { postRotate(angle) }
+        return Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
+    }
+
+    private fun depthToColormap(depths: FloatArray, width: Int, height: Int): Bitmap {
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val pixels = IntArray(width * height)
+        for (i in depths.indices) {
+            val d = depths[i].coerceIn(0f, 1f)
+            // Jet Color Map approximation
+            val r = (d * 255).toInt().coerceIn(0, 255)
+            val g = ((1f - kotlin.math.abs(d - 0.5f) * 2f) * 255).toInt().coerceIn(0, 255)
+            val b = ((1f - d) * 255).toInt().coerceIn(0, 255)
+            pixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        }
+        bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
+        return bitmap
+    }
+
     fun triggerCapture(
         pauseArCallback: () -> Unit,
         resumeArCallback: () -> Unit,
@@ -151,7 +304,7 @@ class ScanViewModel(
 
         _triggerCounter.value += 1
         _captureState.value = CaptureState.CAPTURING
-        
+
         val mode = _multiLensMode.value
         _lastCaptureLog.value = if (mode) "Multi-lens capture starting…" else "Tele burst ×3 starting…"
         Log.i("ScanViewModel", "Capture triggered (Phase 2.1.2 — Mode: ${if (mode) "multi-lens" else "burst"})")
@@ -222,5 +375,11 @@ class ScanViewModel(
             delay(if (_captureState.value == CaptureState.DONE) 600 else 1500)
             _captureState.value = CaptureState.IDLE
         }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        depthEngine.close()
+        yoloEngine.close()
     }
 }
