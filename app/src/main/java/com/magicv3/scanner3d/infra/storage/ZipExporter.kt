@@ -69,6 +69,13 @@ class ZipExporter(private val context: Context) {
                 meta.inputStream().use { it.copyTo(zos) }
                 zos.closeEntry()
             }
+            // 1.5) mesh.glb (if exists)
+            val mesh = File(session.folder, "mesh.glb")
+            if (mesh.exists()) {
+                zos.putNextEntry(ZipEntry("mesh.glb"))
+                mesh.inputStream().use { it.copyTo(zos) }
+                zos.closeEntry()
+            }
             // 2) frames/*
             val total = session.frames.size
             session.frames.forEachIndexed { i, frame ->
@@ -80,6 +87,7 @@ class ZipExporter(private val context: Context) {
                 progress?.invoke(i + 1, total)
             }
         }
+
 
         val uri = FileProvider.getUriForFile(
             context,

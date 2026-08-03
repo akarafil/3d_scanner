@@ -90,15 +90,25 @@ class MeshRepository(private val context: Context) {
             context.contentResolver.openInputStream(uri).use { input ->
                 if (input == null) return@withContext null
 
+                val headerBytes = ByteArray(8)
+                var read = 0
+                while (read < headerBytes.size) {
+                    val n = input.read(headerBytes, read, headerBytes.size - read)
+                    if (n < 0) break
+                    read += n
+                }
+
                 // H-5d: GLB magic + version doğrulaması.
-                if (!isValidGlb(input)) {
+                if (read < 8 || !validateGlbHeader(headerBytes)) {
                     android.util.Log.e(TAG, "Rejected import: not a valid GLB v2 file.")
                     return@withContext null
                 }
 
                 var withinLimit = true
                 targetFile.outputStream().use { output ->
-                    withinLimit = copyWithLimit(input, output, MAX_MESH_SIZE_BYTES)
+                    // Önce okunan 8 baytlık başlığı yazıyoruz (böylece dosya eksiksiz kopyalanır)
+                    output.write(headerBytes, 0, 8)
+                    withinLimit = copyWithLimit(input, output, MAX_MESH_SIZE_BYTES - 8)
                 }
                 if (!withinLimit) {
                     // H-5d: limit aşımı — kısmi dosya hedefte bırakılmaz, silinir.
@@ -114,32 +124,20 @@ class MeshRepository(private val context: Context) {
 
     /**
      * H-5d: GLB header doğrulaması — magic "glTF" + version 2.
-     * 12 baytlık başlığın ilk 8 baytı okunur ve doğrulanır.
+     * 8 baytlık başlığı doğrular.
      */
-    private fun isValidGlb(input: InputStream): Boolean {
-        return try {
-            val header = ByteArray(8)
-            var read = 0
-            while (read < header.size) {
-                val n = input.read(header, read, header.size - read)
-                if (n < 0) break
-                read += n
-            }
-            if (read < 8) return false
-            for (i in GLB_MAGIC.indices) {
-                if (header[i] != GLB_MAGIC[i]) return false
-            }
-            // Version little-endian uint32 → byte[4..7]
-            val version = (header[4].toInt() and 0xFF) or
-                ((header[5].toInt() and 0xFF) shl 8) or
-                ((header[6].toInt() and 0xFF) shl 16) or
-                ((header[7].toInt() and 0xFF) shl 24)
-            version == GLB_VERSION_2
-        } catch (e: Exception) {
-            android.util.Log.e(TAG, "GLB header read failed: ${e.message}")
-            false
+    private fun validateGlbHeader(header: ByteArray): Boolean {
+        for (i in GLB_MAGIC.indices) {
+            if (header[i] != GLB_MAGIC[i]) return false
         }
+        // Version little-endian uint32 → byte[4..7]
+        val version = (header[4].toInt() and 0xFF) or
+            ((header[5].toInt() and 0xFF) shl 8) or
+            ((header[6].toInt() and 0xFF) shl 16) or
+            ((header[7].toInt() and 0xFF) shl 24)
+        return version == GLB_VERSION_2
     }
+
 
     /**
      * H-5d: Akışı boyut limitiyle kopyalar.
