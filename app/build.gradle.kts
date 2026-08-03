@@ -6,9 +6,18 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("com.google.dagger.hilt.android")
+    id("com.google.devtools.ksp")
 }
 
+
+
+// ksp {
+//     arg("correctErrorTypes", "true")
+// }
+
 // ── Windows Robolectric conscrypt native fix ───────────────────────────
+
 // conscrypt-openjdk-uber jar'ından Windows x86_64 DLL'ini build dizinine
 // çıkarır. Test JVM'i bu dizini java.library.path'te arar (bkz. testOptions).
 val conscryptNativeDir = layout.buildDirectory.dir("conscrypt-native").get().asFile
@@ -234,4 +243,16 @@ dependencies {
     androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+
+    // Dagger Hilt
+    implementation("com.google.dagger:hilt-android:2.51.1")
+    ksp("com.google.dagger:hilt-android-compiler:2.51.1")
+    implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
+    
+    // Hilt Testing
+    testImplementation("com.google.dagger:hilt-android-testing:2.51.1")
+    kspTest("com.google.dagger:hilt-android-compiler:2.51.1")
 }
+
+
+

@@ -20,8 +20,10 @@ import java.nio.ByteBuffer
 /**
  * TfliteDepthSource birim testleri (model yok → dürüst null).
  *
- * Assets'ta model olmadığı için gerçek DepthInferenceEngine boş sonuç döner;
- * [depthFromBitmap] bu durumda **null** üretir (sahte/mock depth yok).
+ * NOT (Batch-6+): main assets'te `depth_anything_v2_small.tflite` artık mevcut; ancak
+ * bu testler gerçek DepthInferenceEngine'e **var olmayan** bir model dosya adı vererek
+ * "model yok" senaryosunu assets içeriğinden bağımsız garanti eder. [depthFromBitmap]
+ * bu durumda **null** üretir (sahte/mock depth yok).
  *
  * Kapsam:
  *  - depthFromBitmap → model yokken null.
@@ -42,7 +44,11 @@ class TfliteDepthSourceTest {
 
     private fun source(estimator: com.magicv3.scanner3d.domain.depth.DepthScaleEstimator): TfliteDepthSource =
         TfliteDepthSource(
-            depthEngine = com.magicv3.scanner3d.infra.ai.DepthInferenceEngine(context),
+            depthEngine = com.magicv3.scanner3d.infra.ai.DepthInferenceEngine(
+                context,
+                // "Model yok" senaryosu: gerçekte var olmayan dosya adı — sahte çıktı üretilmez.
+                "varolmayan_model.tflite",
+            ),
             yoloEngine = com.magicv3.scanner3d.infra.ai.YoloInferenceEngine(context),
             depthScaleEstimator = estimator,
         )

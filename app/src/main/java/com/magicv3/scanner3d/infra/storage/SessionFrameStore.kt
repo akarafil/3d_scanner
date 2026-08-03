@@ -49,6 +49,16 @@ class SessionFrameStore(private val context: Context) {
         android.util.Log.i(TAG, "Loaded ${loaded.size} projects from $rootDir")
     }
 
+    suspend fun getSession(sessionId: UUID): ScanSession? = withContext(Dispatchers.IO) {
+        val sessionFolder = File(rootDir, "session_$sessionId")
+        if (sessionFolder.exists() && sessionFolder.isDirectory) {
+            ScanSession.fromJson(sessionFolder)
+        } else {
+            _sessions.value.firstOrNull { it.sessionId == sessionId }
+        }
+    }
+
+
     /**
      * Capture trigger anında çağrılır → yeni bir proje oluşturur ve döner.
      * projectName boşsa otomatik isim verilir (örn: "Tarama 2026-07-30 20:05:43").

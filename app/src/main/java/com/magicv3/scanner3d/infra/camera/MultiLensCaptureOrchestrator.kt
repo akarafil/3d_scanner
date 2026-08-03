@@ -21,6 +21,9 @@ import java.util.UUID
 import com.magicv3.scanner3d.domain.model.ScanSession
 import com.magicv3.scanner3d.infra.storage.SessionFrameStore
 
+import javax.inject.Inject
+import dagger.hilt.android.qualifiers.ApplicationContext
+
 /**
  * Phase 2.2.1 — Multi-lens capture orchestrator.
  *
@@ -35,12 +38,13 @@ import com.magicv3.scanner3d.infra.storage.SessionFrameStore
  *  - Concurrent multi-lens sessions (Honor allows 1 open camera at a time)
  *  - 3D-reconstruction code itself
  */
-class MultiLensCaptureOrchestrator(
-    private val context: Context,
-    private val frameStore: SessionFrameStore = SessionFrameStore(context),
-    private val outputDir: File =
-        File(context.filesDir, "aux_captures").apply { mkdirs() },
+class MultiLensCaptureOrchestrator @Inject constructor(
+    @ApplicationContext private val context: Context,
+    private val frameStore: SessionFrameStore
 ) {
+    private val outputDir: File =
+        File(context.filesDir, "aux_captures").apply { mkdirs() }
+
     companion object {
         private const val TAG = "LensOrchestrator"
 

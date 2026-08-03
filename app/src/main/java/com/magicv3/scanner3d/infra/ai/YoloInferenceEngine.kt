@@ -149,13 +149,26 @@ class YoloInferenceEngine(private val context: Context) {
     }
 
     private fun loadModelFile(context: Context, modelPath: String): ByteBuffer {
+        val externalFile = java.io.File(context.filesDir, "models/$modelPath")
+        if (externalFile.exists() && externalFile.canRead()) {
+            val inputStream = FileInputStream(externalFile)
+            val fileChannel = inputStream.channel
+            val declaredLength = externalFile.length()
+            val buffer = fileChannel.map(FileChannel.MapMode.READ_ONLY, 0, declaredLength)
+            inputStream.close()
+            return buffer
+        }
+
         val fileDescriptor = context.assets.openFd(modelPath)
         val inputStream = FileInputStream(fileDescriptor.fileDescriptor)
         val fileChannel = inputStream.channel
         val startOffset = fileDescriptor.startOffset
         val declaredLength = fileDescriptor.declaredLength
-        return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
+        val buffer = fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
+        inputStream.close()
+        return buffer
     }
+
 
     private fun convertBitmapToByteBuffer(bitmap: Bitmap): ByteBuffer {
         val byteBuffer = ByteBuffer.allocateDirect(INPUT_SIZE * INPUT_SIZE * 3 * 4).apply {

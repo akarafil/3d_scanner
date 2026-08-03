@@ -22,3 +22,7 @@ keystore.properties
 *.jks
 *.keystore
 
+# Large ML/AI Models & Binaries (Faz E.1)
+*.tflite
+*.onnx
+*.lite

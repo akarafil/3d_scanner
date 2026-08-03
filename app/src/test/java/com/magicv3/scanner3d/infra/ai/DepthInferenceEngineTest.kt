@@ -25,6 +25,12 @@ import org.tensorflow.lite.Tensor
  *  - infer(bitmap) → boş FloatArray (sahte depth yok)
  *  - close() iki kez çağrılabilir
  *
+ * NOT (Batch-6+): main assets'te artık `depth_anything_v2_small.tflite` mevcut ve
+ * Robolectric `isIncludeAndroidResources=true` ile main assets'e erişebiliyor. Testlerin
+ * "model YOKKEN" senaryosunu assets içeriğinden bağımsız garantilemesi için `engineWithoutModel()`
+ * helper'ı var olmayan bir model dosya adı (`varolmayan_model.tflite`) kullanır — gerçek
+ * dosya yok, sahte çıktı üretilmez; init dürüstçe boş sonuç verir.
+ *
  * Bölüm 2 — Batch-6 isim dürüstlüğü + imza doğrulama:
  *  - MODEL_NAME, Qualcomm'un sağladığı Small varyantıyla eşleşir
  *    (depth_anything_v2_small.tflite — ViT-Base değil).
@@ -39,16 +45,23 @@ class DepthInferenceEngineTest {
 
     private lateinit var context: Context
 
+    /** "Model yok" senaryosunu garantileyen var olmayan gerçek dosya adı. */
+    private val nonExistentModelName = "varolmayan_model.tflite"
+
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
     }
 
+    /** Testlerin ortak kullandığı engine: assets'te VAR OLMAYAN model adıyla kurulur. */
+    private fun engineWithoutModel(): DepthInferenceEngine =
+        DepthInferenceEngine(context, nonExistentModelName)
+
     // ── Bölüm 1: Model yokken dürüst davranış ──────────────────────────────
 
     @Test
     fun `modelAssetsYoksa_modelYukluDegilVeHizlandirmaYok`() {
-        val engine = DepthInferenceEngine(context)
+        val engine = engineWithoutModel()
 
         assertFalse("GPU/NPU hızlandırma olmamalı", engine.isNpuOrGpuAccelerated)
         assertFalse("Model yüklü olmamalı (dürüst isModelLoaded)", engine.isModelLoaded)
@@ -56,7 +69,7 @@ class DepthInferenceEngineTest {
 
     @Test
     fun `infer_modelYokkenBosDiziDoner`() {
-        val engine = DepthInferenceEngine(context)
+        val engine = engineWithoutModel()
         val bitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
 
         val depth = engine.infer(bitmap)
@@ -66,7 +79,7 @@ class DepthInferenceEngineTest {
 
     @Test
     fun `close_ikiKezCagrilabilir`() {
-        val engine = DepthInferenceEngine(context)
+        val engine = engineWithoutModel()
 
         engine.close()
         engine.close() // hata fırlatmamalı
@@ -100,7 +113,7 @@ class DepthInferenceEngineTest {
 
     @Test
     fun `isSignatureExpected_uyumluImzadaTrueDoner`() {
-        val engine = DepthInferenceEngine(context)
+        val engine = engineWithoutModel()
 
         val ok = engine.isSignatureExpected(
             intArrayOf(1, 518, 518, 3),
@@ -112,7 +125,7 @@ class DepthInferenceEngineTest {
 
     @Test
     fun `isSignatureExpected_girisBoyutuUyumsuzIseFalseDoner`() {
-        val engine = DepthInferenceEngine(context)
+        val engine = engineWithoutModel()
 
         val ok = engine.isSignatureExpected(
             intArrayOf(1, 512, 512, 3), // Small girişi 518x518 — 512 yanlış
@@ -124,7 +137,7 @@ class DepthInferenceEngineTest {
 
     @Test
     fun `isSignatureExpected_cikisBoyutuUyumsuzIseFalseDoner`() {
-        val engine = DepthInferenceEngine(context)
+        val engine = engineWithoutModel()
 
         val ok = engine.isSignatureExpected(
             intArrayOf(1, 518, 518, 3),
@@ -136,7 +149,7 @@ class DepthInferenceEngineTest {
 
     @Test
     fun `isSignatureExpected_girisKanalSayisiUyumsuzIseFalseDoner`() {
-        val engine = DepthInferenceEngine(context)
+        val engine = engineWithoutModel()
 
         val ok = engine.isSignatureExpected(
             intArrayOf(1, 518, 518, 1), // giriş RGB (3 kanal) olmalı
@@ -148,7 +161,7 @@ class DepthInferenceEngineTest {
 
     @Test
     fun `isSignatureExpected_batchBoyutuUyumsuzIseFalseDoner`() {
-        val engine = DepthInferenceEngine(context)
+        val engine = engineWithoutModel()
 
         val ok = engine.isSignatureExpected(
             intArrayOf(2, 518, 518, 3), // batch 1 bekleniyor
@@ -160,7 +173,7 @@ class DepthInferenceEngineTest {
 
     @Test
     fun `isSignatureExpected_bosSekillerdeFalseDoner`() {
-        val engine = DepthInferenceEngine(context)
+        val engine = engineWithoutModel()
 
         val ok = engine.isSignatureExpected(IntArray(0), IntArray(0))
 
@@ -171,7 +184,7 @@ class DepthInferenceEngineTest {
 
     @Test
     fun `validateModelSignature_uyumluImzadaTrueDoner`() {
-        val engine = DepthInferenceEngine(context)
+        val engine = engineWithoutModel()
         val interpreter = mockInterpreter(
             intArrayOf(1, 518, 518, 3),
             intArrayOf(1, 518, 518, 1)
@@ -184,7 +197,7 @@ class DepthInferenceEngineTest {
 
     @Test
     fun `validateModelSignature_uyumsuzImzadaFalseDoner`() {
-        val engine = DepthInferenceEngine(context)
+        val engine = engineWithoutModel()
         val interpreter = mockInterpreter(
             intArrayOf(1, 640, 640, 3), // yanlış: YOLOv8 giriş boyutu karışmış
             intArrayOf(1, 518, 518, 1)
@@ -197,7 +210,7 @@ class DepthInferenceEngineTest {
 
     @Test
     fun `validateModelSignature_tensorOkunamazsaFalseDonerVeCrashEtmez`() {
-        val engine = DepthInferenceEngine(context)
+        val engine = engineWithoutModel()
         val interpreter = mockk<Interpreter>()
         every { interpreter.getInputTensor(0) } throws RuntimeException("tensor read failed")
 

@@ -45,7 +45,16 @@ import com.magicv3.scanner3d.ui.scan.ScanDetailScreen
 import com.magicv3.scanner3d.ui.scan.ScanScreen
 import com.magicv3.scanner3d.ui.scan.ScanViewModel
 import com.magicv3.scanner3d.ui.theme.MagicScannerTheme
+import dagger.hilt.android.AndroidEntryPoint
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import androidx.navigation.NavType
+import androidx.navigation.navArgument
+import java.util.UUID
 
+@AndroidEntryPoint
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -63,13 +72,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-sealed interface Screen {
-    data object Home : Screen
-    data object MyScans : Screen
-    data class Scan(val session: ScanSession) : Screen
-    data class ScanDetail(val session: ScanSession) : Screen
-}
-
 /**
  * Uygulama kök Composable — izin state'e göre router.
  */
@@ -85,80 +87,98 @@ fun MagicScannerApp() {
         )
 
         CameraPermissionState.GRANTED -> {
-            var currentScreen by remember { mutableStateOf<Screen>(Screen.Home) }
+            val navController = rememberNavController()
             val scope = rememberCoroutineScope()
             val ingestionQueue = remember { IngestionQueue.getInstance(context) }
 
-            when (val scr = currentScreen) {
-                is Screen.Home -> HomeScreen(
-                    store = store,
-                    onStartNewScan = { session -> currentScreen = Screen.Scan(session) },
-                    onOpenMyScans = { currentScreen = Screen.MyScans }
-                )
-                is Screen.MyScans -> MyScansScreen(
-                    store = store,
-                    onClose = { currentScreen = Screen.Home },
-                    onOpen = { session -> currentScreen = Screen.ScanDetail(session) }
-                )
-                is Screen.Scan -> {
-                    val application = LocalContext.current.applicationContext as android.app.Application
-                    val scanViewModel = androidx.lifecycle.viewmodel.compose.viewModel<ScanViewModel>(
-                        key = scr.session.sessionId.toString(),
-                        factory = object : androidx.lifecycle.ViewModelProvider.Factory {
-                            override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T {
-                                @Suppress("UNCHECKED_CAST")
-                                return ScanViewModel(
-                                    application = application,
-                                    sessionFrameStore = store,
-                                    activeSession = scr.session
-                                ) as T
-                            }
+            NavHost(navController = navController, startDestination = "home") {
+                composable("home") {
+                    HomeScreen(
+                        store = store,
+                        onStartNewScan = { session ->
+                            navController.navigate("scan/${session.sessionId}")
+                        },
+                        onOpenMyScans = {
+                            navController.navigate("my_scans")
                         }
-                    )
-                    ScanScreen(
-                        viewModel = scanViewModel,
-                        onBack = { currentScreen = Screen.Home }
                     )
                 }
-                is Screen.ScanDetail -> {
-                    val sessionsList by store.sessions.collectAsStateWithLifecycle()
-                    val liveSession = remember(sessionsList, scr.session.sessionId) {
-                        sessionsList.firstOrNull { it.sessionId == scr.session.sessionId } ?: scr.session
-                    }
-                    ScanDetailScreen(
-                        session = liveSession,
-                        onClose = { currentScreen = Screen.MyScans },
-                        onShareZip = { session ->
-                            scope.launch {
-                                runCatching {
-                                    val zipExporter = ZipExporter(context)
-                                    val result = zipExporter.export(session)
-                                    zipExporter.launchShareSheet(result, session.projectName)
-                                }
-                            }
-                        },
-                        onResumeCapture = {
-                            currentScreen = Screen.Scan(liveSession)
-                        },
-                        onStart3DRender = {
-                            // Dürüst ön-kontrol: AlgorDroid Engine kurulu değilse paylaşım
-                            // yedeği kullanılacağı net bir Toast ile bildirilir.
-                            if (!ingestionQueue.isRenderEngineInstalled()) {
-                                android.widget.Toast.makeText(
-                                    context,
-                                    "AlgorDroid Engine kurulu değil — M3SP paylaşım yedeği kullanılacak.",
-                                    android.widget.Toast.LENGTH_LONG
-                                ).show()
-                            }
-                            scope.launch {
-                                store.updateStatus(liveSession.sessionId, ScanStatus.RENDERING)
-                                ingestionQueue.enqueue(liveSession)
-                            }
+                composable("my_scans") {
+                    MyScansScreen(
+                        store = store,
+                        onClose = { navController.popBackStack() },
+                        onOpen = { session ->
+                            navController.navigate("scan_detail/${session.sessionId}")
                         }
                     )
+                }
+                composable(
+                    route = "scan/{sessionId}",
+                    arguments = listOf(navArgument("sessionId") { type = NavType.StringType })
+                ) { backStackEntry ->
+                    val sessionIdStr = backStackEntry.arguments?.getString("sessionId") ?: ""
+                    val sessionId = runCatching { UUID.fromString(sessionIdStr) }.getOrNull()
+                    val scanViewModel = hiltViewModel<ScanViewModel>()
+                    if (sessionId != null) {
+                        scanViewModel.initialize(sessionId)
+                    }
+                    ScanScreen(
+                        viewModel = scanViewModel,
+                        onBack = { navController.popBackStack() }
+                    )
+                }
+                composable(
+                    route = "scan_detail/{sessionId}",
+                    arguments = listOf(navArgument("sessionId") { type = NavType.StringType })
+                ) { backStackEntry ->
+                    val sessionIdStr = backStackEntry.arguments?.getString("sessionId") ?: ""
+                    val sessionId = runCatching { UUID.fromString(sessionIdStr) }.getOrNull()
+                    val sessionsList by store.sessions.collectAsStateWithLifecycle()
+                    val liveSession = remember(sessionsList, sessionId) {
+                        sessionsList.firstOrNull { it.sessionId == sessionId }
+                    }
+
+                    if (liveSession != null) {
+                        ScanDetailScreen(
+                            session = liveSession,
+                            onClose = { navController.popBackStack() },
+                            onShareZip = { session ->
+                                scope.launch {
+                                    runCatching {
+                                        val zipExporter = ZipExporter(context)
+                                        val result = zipExporter.export(session)
+                                        zipExporter.launchShareSheet(result, session.projectName)
+                                    }
+                                }
+                            },
+                            onResumeCapture = {
+                                navController.navigate("scan/${liveSession.sessionId}")
+                            },
+                            onStart3DRender = {
+                                if (!ingestionQueue.isRenderEngineInstalled()) {
+                                    android.widget.Toast.makeText(
+                                        context,
+                                        "AlgorDroid Engine kurulu değil — M3SP paylaşım yedeği kullanılacak.",
+                                        android.widget.Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                                scope.launch {
+                                    store.updateStatus(liveSession.sessionId, ScanStatus.RENDERING)
+                                    ingestionQueue.enqueue(liveSession)
+                                }
+                            }
+                        )
+                    } else {
+                        Text(
+                            text = "Oturum bulunamadı.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(24.dp)
+                        )
+                    }
                 }
             }
         }
+
 
         CameraPermissionState.DENIED -> PermissionDeniedScreen(
             onRetry = permission.requestPermission
