@@ -3,8 +3,10 @@ package com.magicv3.scanner3d.infra.ingestion
 import android.content.Context
 import android.net.Uri
 import com.magicv3.scanner3d.domain.model.ScanSession
+import com.magicv3.scanner3d.domain.model.ScanStatus
 import com.magicv3.scanner3d.infra.storage.CacheCleaner
 import com.magicv3.scanner3d.infra.storage.MeshRepository
+import com.magicv3.scanner3d.infra.storage.SessionFrameStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -15,7 +17,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+
 
 /**
  * Faz 3.2, 3.3 & 4.1 - Ingestion Durum Makinesi
@@ -46,6 +50,7 @@ data class IngestionItem(
  */
 class IngestionQueue private constructor(
     private val context: Context,
+    private val sessionFrameStore: SessionFrameStore = SessionFrameStore(context),
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val exifValidator: ExifValidator = ExifValidator(),
     private val manifestGenerator: ManifestGenerator = ManifestGenerator(context),
@@ -54,6 +59,7 @@ class IngestionQueue private constructor(
     private val meshRepository: MeshRepository = MeshRepository(context),
     private val cacheCleaner: CacheCleaner = CacheCleaner(context),
 ) {
+
 
     /**
      * H-5c: Kuyruğa eklenmiş bilinen-session seti.
@@ -126,10 +132,16 @@ class IngestionQueue private constructor(
             }
             if (meshFile != null) {
                 _queueState.value = IngestionState.Reconstructed(sessionId, meshFile)
+                runCatching {
+                    sessionFrameStore.updateStatus(UUID.fromString(sessionId), ScanStatus.COMPLETED)
+                }
                 // Cache temizliği tetikle
                 cacheCleaner.cleanExpiredCache()
             } else {
                 _queueState.value = IngestionState.Failed(sessionId, "3D model kopyalanamadı.")
+                runCatching {
+                    sessionFrameStore.updateStatus(UUID.fromString(sessionId), ScanStatus.DRAFT)
+                }
             }
             // H-5c: session tamamlandı → bilinen-session setinden temizle.
             knownSessions.remove(sessionId)
@@ -141,6 +153,11 @@ class IngestionQueue private constructor(
      */
     fun markError(sessionId: String, error: String) {
         _queueState.value = IngestionState.Failed(sessionId, error)
+        scope.launch {
+            runCatching {
+                sessionFrameStore.updateStatus(UUID.fromString(sessionId), ScanStatus.DRAFT)
+            }
+        }
         // H-5c: hatalı session da bilinen-session setinden temizlenir.
         knownSessions.remove(sessionId)
     }
@@ -157,6 +174,7 @@ class IngestionQueue private constructor(
             if (!validation.isValid) {
                 val errorMsg = validation.issues.firstOrNull()?.message ?: "EXIF validation failed"
                 _queueState.value = IngestionState.Failed(sId, "Doğrulama Hatası: $errorMsg")
+                sessionFrameStore.updateStatus(item.session.sessionId, ScanStatus.DRAFT)
                 knownSessions.remove(sId)
                 return
             }
@@ -177,16 +195,25 @@ class IngestionQueue private constructor(
                 // 4. DELIVERED
                 _queueState.value = IngestionState.Delivered(sId, mnpResult.file)
                 android.util.Log.i(TAG, "Successfully delivered MNP for $sId")
+
+                if (!transferAdapter.isEngineInstalled()) {
+                    sessionFrameStore.updateStatus(item.session.sessionId, ScanStatus.DRAFT)
+                }
             } else {
                 _queueState.value = IngestionState.Failed(sId, transfer.message)
+                sessionFrameStore.updateStatus(item.session.sessionId, ScanStatus.DRAFT)
                 knownSessions.remove(sId)
             }
         }.onFailure { e ->
             android.util.Log.e(TAG, "Ingestion failed for $sId", e)
             _queueState.value = IngestionState.Failed(sId, e.message ?: "Bilinmeyen kuyruk hatası")
+            runCatching {
+                sessionFrameStore.updateStatus(item.session.sessionId, ScanStatus.DRAFT)
+            }
             knownSessions.remove(sId)
         }
     }
+
 
     companion object {
         private const val TAG = "IngestionQueue"
@@ -194,10 +221,23 @@ class IngestionQueue private constructor(
         @Volatile
         private var INSTANCE: IngestionQueue? = null
 
-        fun getInstance(context: Context): IngestionQueue {
+        fun getInstance(context: Context, sessionFrameStore: SessionFrameStore): IngestionQueue {
             return INSTANCE ?: synchronized(this) {
-                INSTANCE ?: IngestionQueue(context.applicationContext).also { INSTANCE = it }
+                INSTANCE ?: IngestionQueue(
+                    context = context.applicationContext,
+                    sessionFrameStore = sessionFrameStore
+                ).also { INSTANCE = it }
             }
         }
+
+        fun getInstance(context: Context): IngestionQueue {
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: IngestionQueue(
+                    context = context.applicationContext,
+                    sessionFrameStore = SessionFrameStore(context.applicationContext)
+                ).also { INSTANCE = it }
+            }
+        }
+
     }
 }

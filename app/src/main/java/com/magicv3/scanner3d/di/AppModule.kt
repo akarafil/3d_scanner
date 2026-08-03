@@ -42,9 +42,13 @@ object AppModule {
 
     @Provides
     @Singleton
-    fun provideIngestionQueue(@ApplicationContext context: Context): IngestionQueue {
-        return IngestionQueue.getInstance(context)
+    fun provideIngestionQueue(
+        @ApplicationContext context: Context,
+        sessionFrameStore: SessionFrameStore
+    ): IngestionQueue {
+        return IngestionQueue.getInstance(context, sessionFrameStore)
     }
+
 
     @Provides
     @Singleton

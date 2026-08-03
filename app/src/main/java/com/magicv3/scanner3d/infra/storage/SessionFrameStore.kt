@@ -43,11 +43,21 @@ class SessionFrameStore(private val context: Context) {
     suspend fun refresh() = withContext(Dispatchers.IO) {
         val loaded = rootDir.listFiles { f -> f.isDirectory }
             ?.sortedByDescending { it.lastModified() }
-            ?.mapNotNull { ScanSession.fromJson(it) }
+            ?.mapNotNull { dir ->
+                val session = ScanSession.fromJson(dir)
+                if (session != null && session.status == ScanStatus.RENDERING) {
+                    val recovered = session.copy(status = ScanStatus.DRAFT)
+                    runCatching { writeMeta(recovered) }
+                    recovered
+                } else {
+                    session
+                }
+            }
             ?: emptyList()
         _sessions.value = loaded
         android.util.Log.i(TAG, "Loaded ${loaded.size} projects from $rootDir")
     }
+
 
     suspend fun getSession(sessionId: UUID): ScanSession? = withContext(Dispatchers.IO) {
         val sessionFolder = File(rootDir, "session_$sessionId")
