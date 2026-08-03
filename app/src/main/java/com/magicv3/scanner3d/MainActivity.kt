@@ -53,9 +53,14 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.NavType
 import androidx.navigation.navArgument
 import java.util.UUID
+import javax.inject.Inject
+
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+    @Inject
+    lateinit var sessionFrameStore: SessionFrameStore
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -65,7 +70,7 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    MagicScannerApp()
+                    MagicScannerApp(sessionFrameStore)
                 }
             }
         }
@@ -76,10 +81,10 @@ class MainActivity : ComponentActivity() {
  * Uygulama kök Composable — izin state'e göre router.
  */
 @Composable
-fun MagicScannerApp() {
+fun MagicScannerApp(store: SessionFrameStore) {
     val context = LocalContext.current
     val permission = rememberCameraPermissionState(context)
-    val store = remember { SessionFrameStore(context) }
+
 
     when (permission.state) {
         CameraPermissionState.NOT_REQUESTED -> PermissionRequestScreen(

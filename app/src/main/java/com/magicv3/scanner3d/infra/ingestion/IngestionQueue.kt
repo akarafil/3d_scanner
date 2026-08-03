@@ -198,7 +198,9 @@ class IngestionQueue private constructor(
 
                 if (!transferAdapter.isEngineInstalled()) {
                     sessionFrameStore.updateStatus(item.session.sessionId, ScanStatus.DRAFT)
+                    knownSessions.remove(sId)
                 }
+
             } else {
                 _queueState.value = IngestionState.Failed(sId, transfer.message)
                 sessionFrameStore.updateStatus(item.session.sessionId, ScanStatus.DRAFT)
