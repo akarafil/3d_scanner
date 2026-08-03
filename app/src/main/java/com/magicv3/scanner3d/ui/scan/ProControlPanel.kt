@@ -27,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import kotlin.math.roundToInt
 
 @Composable
 fun ProControlPanel(
@@ -38,6 +39,14 @@ fun ProControlPanel(
     onShutterChange: (Int) -> Unit,
     onFocusChange: (Float) -> Unit,
     onLockToggle: () -> Unit,
+    // Batch-3: EV + WB kontrolleri ve cihaz yeteneği aralıkları.
+    evValue: Float = 0f,
+    onEvChange: (Float) -> Unit = {},
+    colorTempValue: Int = 5500,
+    onColorTempChange: (Int) -> Unit = {},
+    isoRange: IntRange = 100..1600,
+    evRange: IntRange = -12..12,
+    evStep: Float = 1f / 6f,
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -64,7 +73,7 @@ fun ProControlPanel(
                 color = MaterialTheme.colorScheme.primary
             )
 
-            // ISO Slider
+            // ISO Slider — aralık cihaz yeteneğinden (isoRange) gelir.
             Column {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -73,18 +82,19 @@ fun ProControlPanel(
                     Text("ISO", style = MaterialTheme.typography.labelSmall)
                     Text("$isoValue", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall)
                 }
+                val isoSteps = ((isoRange.last - isoRange.first) / 100).coerceIn(10, 50)
                 Slider(
-                    value = isoValue.toFloat(),
+                    value = isoValue.toFloat().coerceIn(isoRange.first.toFloat(), isoRange.last.toFloat()),
                     onValueChange = { onIsoChange(it.toInt()) },
-                    valueRange = 100f..1600f,
-                    steps = 14,
+                    valueRange = isoRange.first.toFloat()..isoRange.last.toFloat(),
+                    steps = isoSteps,
                     enabled = !isSettingsLocked,
                     modifier = Modifier.height(24.dp)
                 )
             }
 
-            // Enstantane Slider
-            val shutterSteps = listOf(125, 250, 500, 1000)
+            // Enstantane Slider — genişletilmiş presets (30..4000).
+            val shutterSteps = listOf(30, 60, 125, 250, 500, 1000, 2000, 4000)
             val activeStepIndex = shutterSteps.indexOf(shutterFraction).coerceAtLeast(0)
             Column {
                 Row(
@@ -96,9 +106,9 @@ fun ProControlPanel(
                 }
                 Slider(
                     value = activeStepIndex.toFloat(),
-                    onValueChange = { onShutterChange(shutterSteps[it.toInt().coerceIn(0, 3)]) },
-                    valueRange = 0f..3f,
-                    steps = 2,
+                    onValueChange = { onShutterChange(shutterSteps[it.toInt().coerceIn(0, shutterSteps.size - 1)]) },
+                    valueRange = 0f..(shutterSteps.size - 1).toFloat(),
+                    steps = shutterSteps.size - 2,
                     enabled = !isSettingsLocked,
                     modifier = Modifier.height(24.dp)
                 )
@@ -118,6 +128,60 @@ fun ProControlPanel(
                     value = focusDistanceValue,
                     onValueChange = onFocusChange,
                     valueRange = 0.0f..10.0f,
+                    enabled = !isSettingsLocked,
+                    modifier = Modifier.height(24.dp)
+                )
+            }
+
+            // EV Slider — AE kompanzasyonu (yalnızca AE AUTO'da uygulanır).
+            // Kaydırıcı artık cihazın AE kompanzasyon aralığını EV cinsinden yansıtır (range × step birimi).
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("EV", style = MaterialTheme.typography.labelSmall)
+                    Text(
+                        text = String.format(java.util.Locale.US, "%+.1f", evValue),
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+                // Etkin EV sınırları cihazın AE kompanzasyon aralığından (evRange × evStep) türetilir.
+                val evMinEv = (evRange.first * evStep).coerceAtLeast(-4.0f)
+                val evMaxEv = (evRange.last * evStep).coerceAtMost(4.0f)
+                val evSliderSteps = (((evMaxEv - evMinEv) / evStep).roundToInt() - 1).coerceIn(4, 64)
+                Slider(
+                    value = evValue.coerceIn(evMinEv, evMaxEv),
+                    onValueChange = onEvChange,
+                    valueRange = evMinEv..evMaxEv,
+                    steps = evSliderSteps,
+                    enabled = true,
+                    modifier = Modifier.height(24.dp)
+                )
+                if (isSettingsLocked) {
+                    Text(
+                        text = "Manuel pozlama kilitliyken EV devre dışı",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+            }
+
+            // WB Slider — renk sıcaklığı (Kelvin, 2500..8000).
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("WB", style = MaterialTheme.typography.labelSmall)
+                    Text("${colorTempValue}K", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall)
+                }
+                Slider(
+                    value = colorTempValue.toFloat().coerceIn(2500f, 8000f),
+                    onValueChange = { onColorTempChange(it.toInt()) },
+                    valueRange = 2500f..8000f,
+                    steps = 54, // 100K adımları (55 segment)
                     enabled = !isSettingsLocked,
                     modifier = Modifier.height(24.dp)
                 )

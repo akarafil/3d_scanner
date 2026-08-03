@@ -55,6 +55,12 @@ class MultiLensCaptureOrchestrator(
 
         /** Hard retry cap per frame to avoid infinite loop on transient onError=2. */
         private const val MAX_RETRIES_PER_FRAME = 2
+
+        /**
+         * B-6: AuxProbe cache'i boş olduğunda (ilk çalıştırma / cache yoksa) kullanılan
+         * fallback aday ID'ler. Main(0) + selfie(1) + phantom aux adayları.
+         */
+        private val DEFAULT_AUX_CANDIDATES = listOf("0", "1", "2", "3", "4", "5", "8", "9")
     }
 
     /** Public progress channel: 0.0..1.0 across total frames. */
@@ -87,7 +93,13 @@ class MultiLensCaptureOrchestrator(
     private suspend fun getAuxLensMap(): Map<String, CameraLens> = withContext(Dispatchers.IO) {
         auxLensMap ?: mutex.withLock {
             auxLensMap ?: run {
-                val candidateIds = listOf("0", "1", "2", "3", "4", "5", "8", "9")
+                // B-6: AuxProbe cache'teki gerçekten açılabilir aux lens ID'lerini kullan.
+                // Cache boşsa (ilk çalıştırma / farklı cihaz) fallback adaylara düşer.
+                val auxProbe = AuxProbe(context)
+                auxProbe.refreshIfNeeded()
+                val candidateIds = auxProbe.getCachedOpenableIds()
+                    .ifEmpty { DEFAULT_AUX_CANDIDATES }
+                Log.i(TAG, "Aux lens candidates (from AuxProbe cache): $candidateIds")
                 val resolved = AuxLensCatalog(context).resolve(candidateIds)
                 auxLensMap = resolved
                 resolved
@@ -111,13 +123,17 @@ class MultiLensCaptureOrchestrator(
         manualIso: Int? = null,
         manualExposureTimeNs: Long? = null,
         manualFocusDistance: Float? = null,
+        manualEv: Float? = null,
+        manualColorTemperature: Int? = null,
     ): File? {
         val raw = captureWithRetry(
             lensId = lensId,
             attempt = 0,
             manualIso = manualIso,
             manualExposureTimeNs = manualExposureTimeNs,
-            manualFocusDistance = manualFocusDistance
+            manualFocusDistance = manualFocusDistance,
+            manualEv = manualEv,
+            manualColorTemperature = manualColorTemperature
         ) ?: return null
         val (w, h) = runCatching { readImageSize(raw) }.getOrDefault(Pair(0, 0))
         val lens = getAuxLensMap()[lensId]
@@ -158,6 +174,8 @@ class MultiLensCaptureOrchestrator(
         manualIso: Int? = null,
         manualExposureTimeNs: Long? = null,
         manualFocusDistance: Float? = null,
+        manualEv: Float? = null,
+        manualColorTemperature: Int? = null,
     ): List<File> = withContext(Dispatchers.IO) {
         val permissionGranted = ContextCompat.checkSelfPermission(
             context, Manifest.permission.CAMERA
@@ -181,7 +199,7 @@ class MultiLensCaptureOrchestrator(
                 var file: File? = null
                 while (attempt <= MAX_RETRIES_PER_FRAME) {
                     try {
-                        val raw = session.captureFrame(manualIso, manualExposureTimeNs, manualFocusDistance)
+                        val raw = session.captureFrame(manualIso, manualExposureTimeNs, manualFocusDistance, manualEv, manualColorTemperature)
                         val (w, h) = runCatching { readImageSize(raw) }.getOrDefault(Pair(0, 0))
                         val lens = getAuxLensMap()[lensId]
                         val stamped = exifWriter.stamp(
@@ -224,6 +242,9 @@ class MultiLensCaptureOrchestrator(
                     _progress.value =
                         CaptureProgress.FrameFailure(i, count, lensId, IOException("frame $i failed after retries"))
                 }
+                // INTER_FRAME_GAP_MS: Çerçeveler arası bekleme KRİTİK — AE/AF yeniden
+                // yakınsarken ARCore VIO'nun 400ms frame-gap toleransını aşmamak için
+                // gerekli. Kaldırılırsa Honor HAL'inde asenkron capture yarışı üreyebilir.
                 if (i < count - 1) delay(INTER_FRAME_GAP_MS)
             }
         } catch (e: Exception) {
@@ -231,6 +252,9 @@ class MultiLensCaptureOrchestrator(
             _progress.value = CaptureProgress.FrameFailure(0, count, lensId, e)
         } finally {
             Log.i(TAG, "[$lensId] Closing sticky camera session.")
+            // F1 doğrulaması: RawAuxCaptureSession.close() → closeQuietly() SIRALI
+            // kapanışı (session.onClosed bekle → imageReader → cameraDevice) kullanır.
+            // Buradaki delegasyon, endConfigure:905 yüzey yarışını önlemek için yeterlidir.
             runCatching { session.close() }
         }
         _progress.value = CaptureProgress.BurstDone(files.toList())
@@ -251,9 +275,17 @@ class MultiLensCaptureOrchestrator(
         manualIso: Int? = null,
         manualExposureTimeNs: Long? = null,
         manualFocusDistance: Float? = null,
+        manualEv: Float? = null,
+        manualColorTemperature: Int? = null,
     ): Map<String, File> = withContext(Dispatchers.IO) {
         val sessionId = activeSession?.sessionId ?: UUID.randomUUID()
         val result = LinkedHashMap<String, File>()
+
+        // F3: Çekim başlangıcı net işareti — kamera tam güç kullanılırken ARCore
+        // soft-pause periyoduna girer (izleme geçici olarak düşük frame üretir).
+        Log.i(TAG, "Multi-lens çekim başlıyor (${lensIds.size} lens) — ARCore soft-pause periyodu")
+
+        var consecutiveFailures = 0
         for (id in lensIds) {
             _progress.value = CaptureProgress.FrameStarted(result.size, lensIds.size, id)
             val file = captureAndStamp(
@@ -263,17 +295,38 @@ class MultiLensCaptureOrchestrator(
                 rotation = rotation,
                 manualIso = manualIso,
                 manualExposureTimeNs = manualExposureTimeNs,
-                manualFocusDistance = manualFocusDistance
+                manualFocusDistance = manualFocusDistance,
+                manualEv = manualEv,
+                manualColorTemperature = manualColorTemperature
             )
             if (file != null) {
+                consecutiveFailures = 0
                 result[id] = file
                 _progress.value = CaptureProgress.FrameSuccess(result.size - 1, lensIds.size, id, file)
+                // F3: Her lens tamamlandığında ilerleme işareti.
+                Log.i(TAG, "[$id] lens tamamlandı (${result.size}/${lensIds.size}) → ${file.name}")
             } else {
+                consecutiveFailures++
                 _progress.value =
                     CaptureProgress.FrameFailure(result.size, lensIds.size, id, IOException("lens $id failed"))
+                // F3: Arka arkaya 2+ lens başarısız olursa durumu Log.e ile raporla.
+                // (Yeni hata fırlatma / mimari değişiklik YAPILMAZ — mevcut akış korunur.)
+                if (consecutiveFailures >= 2) {
+                    Log.e(
+                        TAG,
+                        "Ardışık $consecutiveFailures lens başarısız oldu (lens=<$id>) — " +
+                            "sıcaklık/HAL yarışı riski yüksek; kullanıcı bilgilendirilmeli"
+                    )
+                }
             }
+            // INTER_FRAME_GAP_MS: Lens değişimi sonrası bekleme KRİTİK — HAL yeniden
+            // konfigüre olurken ARCore VIO'nun 400ms frame-gap toleransını aşmamak
+            // için gereklidir (endConfigure:905 yarış riskini azaltır).
             delay(INTER_FRAME_GAP_MS)
         }
+
+        // F3: Çekim bitişi net işareti — ARCore izleme yeniden devreye alınır.
+        Log.i(TAG, "Çekim tamamlandı — izleme yeniden başlatılıyor (${result.size}/${lensIds.size} lens başarılı)")
         _progress.value = CaptureProgress.BurstDone(result.values.toList())
         result
     }
@@ -284,6 +337,8 @@ class MultiLensCaptureOrchestrator(
         manualIso: Int? = null,
         manualExposureTimeNs: Long? = null,
         manualFocusDistance: Float? = null,
+        manualEv: Float? = null,
+        manualColorTemperature: Int? = null,
     ): File? {
         val permissionGranted = ContextCompat.checkSelfPermission(
             context, Manifest.permission.CAMERA
@@ -298,10 +353,14 @@ class MultiLensCaptureOrchestrator(
             return null
         }
         val session = RawAuxCaptureSession(context, lensId, outputDir)
+        // F1 doğrulaması: captureSingleFrame'in finally { close() } bloğu
+        // closeQuietly() → SIRALI kapanışı (session.onClosed → reader → device) tetikler.
         val result = session.captureSingleFrame(
             manualIso = manualIso,
             manualExposureTimeNs = manualExposureTimeNs,
-            manualFocusDistance = manualFocusDistance
+            manualFocusDistance = manualFocusDistance,
+            manualEv = manualEv,
+            manualColorTemperature = manualColorTemperature
         )
         return if (result.isSuccess) {
             result.getOrThrow().also { Log.i(TAG, "[$lensId] frame saved on attempt=$attempt") }
@@ -315,7 +374,9 @@ class MultiLensCaptureOrchestrator(
                 attempt = attempt + 1,
                 manualIso = manualIso,
                 manualExposureTimeNs = manualExposureTimeNs,
-                manualFocusDistance = manualFocusDistance
+                manualFocusDistance = manualFocusDistance,
+                manualEv = manualEv,
+                manualColorTemperature = manualColorTemperature
             )
         }
     }

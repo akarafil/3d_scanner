@@ -33,13 +33,13 @@ fun ThermalWarningDialog(
                     Text(
                         String.format(
                             java.util.Locale.US,
-                            "SoC sıcaklığı %.1f°C seviyesine ulaştı. NPU donanımını korumak amacıyla tarama duraklatılmıştır.",
+                            "SoC sıcaklığı kritik seviyeye (%.1f°C) ulaştı. NPU donanımını korumak amacıyla tarama duraklatılmıştır.",
                             currentTemp
                         )
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
-                        "Lütfen cihazın soğumasını bekleyin. Tarama 47.0°C altında otomatik olarak tekrar aktif olacaktır.",
+                        "Lütfen cihazın soğumasını bekleyin. Tarama 80.0°C altında otomatik olarak tekrar aktif olacaktır.",
                         color = Color.Yellow
                     )
                 }

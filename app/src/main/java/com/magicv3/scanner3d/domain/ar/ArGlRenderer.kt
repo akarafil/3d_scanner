@@ -5,10 +5,12 @@ import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.util.Log
+import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
 import com.google.ar.core.PointCloud
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
+import com.google.ar.core.exceptions.UnavailableException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
@@ -16,6 +18,26 @@ import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
 data class CameraPose(val translation: FloatArray, val rotationQuaternion: FloatArray)
+
+/**
+ * F2 — Depth kaynağı durumu (dürüst izleme).
+ *
+ * ARCore motion-stereo depth boru hattı bazı cihazlarda (örn. Honor Magic V3)
+ * native `spherical_rectifier.cc` RET_CHECK hatası verir ve güvenilir depth
+ * üretemez; uygulama bu durumda TFLite fallback'e geçer. Hangi kaynağın gerçekten
+ * üretimde olduğu [ArGlRenderer.depthSourceState] ile tutulur; değişiklikler
+ * loglanır ve [ArGlRenderer.onDepthSourceStateChanged] ile üst katmana bildirilir.
+ */
+enum class DepthSourceState {
+    /** ARCore Depth API metrik (metre) depth üretti. */
+    AR_CORE,
+
+    /** ARCore depth null döndü → TFLite fallback normalize depth üretti. */
+    TFLITE,
+
+    /** Bu karede hiçbir kaynak depth üretemedi (model yok / ARCore desteklenmiyor). */
+    NONE
+}
 
 class ArGlRenderer(
     private val context: Context,
@@ -26,6 +48,36 @@ class ArGlRenderer(
         private set
 
     var onFrameAvailable: ((com.google.ar.core.Frame) -> Unit)? = null
+
+    /**
+     * O-5: RENDERMODE_WHEN_DIRTY desteği — her çizimin sonunda bir sonraki kareyi
+     * talep eder (ARCore frame akışı kesintisiz devam eder, paused durumda döngü
+     * durur → pil tasarrufu). ArPointCloudSurfaceView tarafından bağlanır.
+     */
+    var requestRender: (() -> Unit)? = null
+
+    /**
+     * B-3: ARCore açılamazsa (UnavailableException / cihaz desteklemiyor) üst katmana
+     * anlamlı hata bildirir. Sessiz yutma yok — ScanViewModel bu sinyalle UI'a fallback gösterir.
+     */
+    var onArCoreUnavailable: ((String) -> Unit)? = null
+
+    /**
+     * F2 — Aktif depth kaynağı durumu.
+     *
+     * GL thread ve ViewModel coroutine'i farklı thread'lerde koştuğundan `@Volatile`.
+     * ArGlRenderer depth üretmez; üst katman (ScanViewModel.onFrameAvailable) hangi
+     * kaynağın çalıştığını [updateDepthSourceState] ile günceller. Bu alan dürüst
+     * izleme/denetim içindir: AR_CORE / TFLITE / NONE durumundan biri tutulur.
+     */
+    @Volatile
+    internal var depthSourceState: DepthSourceState = DepthSourceState.NONE
+        private set
+
+    /**
+     * F2 — Depth kaynağı durumu değiştiğinde üst katmana bildirir (teşhis/denetim izi).
+     */
+    internal var onDepthSourceStateChanged: ((DepthSourceState) -> Unit)? = null
 
     private var cameraTextureId = -1
     private var pointCloudProgram = 0
@@ -89,10 +141,40 @@ class ArGlRenderer(
         // 3. ARCore Oturumunu GL Thread'i İçinde Başlat/Tekrar Bağla
         try {
             if (arSession == null) {
+                // B-3: ARCore kullanılabilirlik ön kontrolü (fallback katmanı).
+                val availability = runCatching {
+                    ArCoreApk.getInstance().checkAvailability(context)
+                }.getOrNull()
+                if (availability != null &&
+                    (availability == ArCoreApk.Availability.UNSUPPORTED_DEVICE_NOT_CAPABLE ||
+                        availability == ArCoreApk.Availability.UNKNOWN_ERROR)
+                ) {
+                    isPaused = true
+                    val reason = "ARCore bu cihazda kullanılamıyor (${availability.name})."
+                    Log.e(TAG, reason)
+                    onArCoreUnavailable?.invoke(reason)
+                    return
+                }
                 arSession = Session(context).apply {
                     val arConfig = Config(this).apply {
                         updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
                         focusMode = Config.FocusMode.AUTO
+                        // Faz 4 (Strateji C): ARCore Depth API — destekleyen cihazlarda
+                        // AUTOMATIC, session'ın metrik depth üretmesini sağlar
+                        // (acquireDepthImage16Bits). Desteklemeyen cihazlarda oturum
+                        // çalışmaya devam eder; ArCoreDepthSource null döner ve
+                        // TFLite fallback devreye girer.
+                        //
+                        // F2 RİSKİ (Honor Magic V3 logu): motion-stereo depth boru hattı
+                        // native `spherical_rectifier.cc:159 RET_CHECK failure
+                        // (kUnrectifiedPinhole vs kUnrectifiedOriginal)` hatasıyla depth
+                        // üretemeyebilir. DepthMode AUTOMATIC bilinçli olarak KORUNUR —
+                        // depth API destekleyen cihazlarda en iyi (metrik) sonucu verir;
+                        // bu cihazda başarısız olursa ArCoreDepthSource null döner ve
+                        // ScanViewModel.onFrameAvailable TfliteDepthSource'a (tek
+                        // güvenilir metrik depth kaynağı) düşer. Fallback garantisi
+                        // ArCoreDepthSource.acquireDepth içinde (her yol null) sağlanır.
+                        depthMode = Config.DepthMode.AUTOMATIC
                     }
                     configure(arConfig)
                 }
@@ -100,9 +182,14 @@ class ArGlRenderer(
             arSession?.setCameraTextureName(cameraTextureId)
             arSession?.resume()
             isPaused = false
-            Log.i("ArGlRenderer", "GL Surface kuruldu. ARCore oturumu ve EGL Context aktif.")
+            Log.i(TAG, "GL Surface kuruldu. ARCore oturumu ve EGL Context aktif.")
+        } catch (e: UnavailableException) {
+            // B-3: ARCore kurulu değil / desteklenmiyor → UI'a bildir, sessizce yutma.
+            isPaused = true
+            Log.e(TAG, "ARCore unavailable: ${e.message}")
+            onArCoreUnavailable?.invoke(e.message ?: "ARCore kullanılamıyor.")
         } catch (e: Exception) {
-            Log.e("ArGlRenderer", "ARCore GL kurulum hatası: ${e.message}")
+            Log.e(TAG, "ARCore GL kurulum hatası: ${e.message}")
         }
     }
 
@@ -119,37 +206,49 @@ class ArGlRenderer(
 
         try {
             // ARCore update() metodu ARTIK GÜVENLE GL THREAD'İ İÇİNDE ÇAĞRILIYOR
-            val frame = arSession?.update() ?: return
+            val frame = arSession?.update()
 
-            // 1. Kamera Feed'ini Arka Plana Çiz (CameraX Preview yerine)
-            drawBackground(frame)
+            if (frame != null) {
+                // 1. Kamera Feed'ini Arka Plana Çiz (CameraX Preview yerine)
+                drawBackground(frame)
 
-            onFrameAvailable?.invoke(frame)
+                onFrameAvailable?.invoke(frame)
 
-            val camera = frame.camera
-            if (camera.trackingState == TrackingState.TRACKING) {
-                // 2. Anlık 6-DoF Pozisyonunu Al ve Üst Katmana Bildir
-                val pose = camera.pose
-                onPoseUpdated(
-                    CameraPose(
-                        translation = pose.translation,
-                        rotationQuaternion = pose.rotationQuaternion
+                val camera = frame.camera
+                if (camera.trackingState == TrackingState.TRACKING) {
+                    // 2. Anlık 6-DoF Pozisyonunu Al ve Üst Katmana Bildir
+                    val pose = camera.pose
+                    onPoseUpdated(
+                        CameraPose(
+                            translation = pose.translation,
+                            rotationQuaternion = pose.rotationQuaternion
+                        )
                     )
-                )
 
-                // 3. Kamera Matrislerini Çek (Projection * View)
-                camera.getProjectionMatrix(projectionMatrix, 0, 0.1f, 100.0f)
-                camera.getViewMatrix(viewMatrix, 0)
-                android.opengl.Matrix.multiplyMM(mvpMatrix, 0, projectionMatrix, 0, viewMatrix, 0)
+                    // 3. Kamera Matrislerini Çek (Projection * View)
+                    camera.getProjectionMatrix(projectionMatrix, 0, 0.1f, 100.0f)
+                    camera.getViewMatrix(viewMatrix, 0)
+                    android.opengl.Matrix.multiplyMM(mvpMatrix, 0, projectionMatrix, 0, viewMatrix, 0)
 
-                // 4. Nokta Bulutunu (Point Cloud) GPU Üzerinde Çiz
-                val pointCloud = frame.acquirePointCloud()
-                drawPointCloud(pointCloud)
-                pointCloud.release()
+                    // 4. Nokta Bulutunu (Point Cloud) GPU Üzerinde Çiz
+                    // B17: acquirePointCloud her zaman release edilmelidir (native buffer
+                    // sızıntısı olmasın) — try/finally ile garanti altına alınır.
+                    val pointCloud = frame.acquirePointCloud()
+                    try {
+                        drawPointCloud(pointCloud)
+                    } finally {
+                        runCatching { pointCloud.release() }
+                    }
+                }
             }
         } catch (e: Exception) {
             Log.w("ArGlRenderer", "Draw Frame Hatası: ${e.message}")
         }
+
+        // O-5: WHEN_DIRTY modunda bir sonraki kareyi planla — döngü paused
+        // olmadığı sürece canlı kalır. Paused iken bu çağrı yapılmaz, GL thread
+        // idle'a geçer (pil tasarrufu).
+        requestRender?.invoke()
     }
 
     private fun drawBackground(frame: com.google.ar.core.Frame) {
@@ -316,5 +415,26 @@ class ArGlRenderer(
         arSession?.pause()
         arSession?.close()
         arSession = null
+    }
+
+    /**
+     * F2 — Depth kaynağı durumunu günceller; değişiklikte loglar ve callback tetikler.
+     *
+     * ArGlRenderer depth üretmez; durumu üst katman (ScanViewModel) bildirir:
+     *  - ARCore metrik depth null dönüp TFLite'a düşüldüğünde [DepthSourceState.TFLITE],
+     *  - hiçbir kaynak üretemediğinde [DepthSourceState.NONE],
+     *  - ARCore depth üretildiğinde [DepthSourceState.AR_CORE].
+     *
+     * Sessiz yutma yok — her değişiklik Log.i ile kaydedilir (gerçek cihaz teşhisi).
+     */
+    internal fun updateDepthSourceState(state: DepthSourceState) {
+        if (depthSourceState == state) return
+        depthSourceState = state
+        Log.i(TAG, "Depth kaynağı durumu değişti: ${state.name} (AR_CORE=metrik, TFLITE=fallback, NONE=yok)")
+        onDepthSourceStateChanged?.invoke(state)
+    }
+
+    companion object {
+        private const val TAG = "ArGlRenderer"
     }
 }

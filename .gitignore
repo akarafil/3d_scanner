@@ -16,3 +16,9 @@
 /app/build
 .kotlin/
 
+# Keystore / signing secrets (N1)
+keystore.properties
+/keystore/
+*.jks
+*.keystore
+

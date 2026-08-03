@@ -15,6 +15,7 @@ import com.magicv3.scanner3d.domain.model.CpuMetrics
 import com.magicv3.scanner3d.domain.model.ThermalMetrics
 import com.magicv3.scanner3d.domain.model.ThermalZoneReading
 import com.magicv3.scanner3d.domain.model.ThermalZoneType
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -29,6 +30,10 @@ import java.io.File
  * Mimari konum: infra/system/ → çekirdek API'leri (ActivityManager,
  * Debug, /proc) doğrudan çağırır. Domain ya da UI işi DEĞİL.
  *
+ * Testability (kalite ekibi refactorü): [monitorDispatcher] ve proc/sys dosya
+ * yolları constructor'dan enjekte edilebilir — birim testler gerçek /proc
+ * yerine fake dosya yolları ve test dispatcher'ı kullanabilir.
+ *
  * Phase 1.4 (BU ADIM): Sadece RAM
  * Phase 1.5 (sonraki) : CPU (top komutu parsing veya /proc/stat)
  * Phase 1.6 (sonraki) : Thermal (SensorManager TYPE_TEMPERATURE)
@@ -42,8 +47,8 @@ import java.io.File
  * ── Thread Modeli ──────────────────────────────────────────────────
  * • flow { ... } builder: coroutine context'te çalışır
  *   (varsayılan: collect çağıran thread — Compose'da main)
- * • flowOn(Dispatchers.IO) → yukarı akış (flow builder gövdesi)
- *   IO dispatcher'a taşınır → /proc/meminfo file read main'i bloklamaz
+ * • flowOn(monitorDispatcher) → yukarı akış (flow builder gövdesi)
+ *   testte testDispatcher, üretimde Dispatchers.IO olur
  * • ActivityManager.getMemoryInfo() → binder IPC (system_server)
  *   ~1-3ms — main thread'de zararsız ama yine de IO'da daha iyi
  * • Debug.getMemoryInfo() → native libmeminfo → ~5-10ms
@@ -51,9 +56,19 @@ import java.io.File
  *
  * @param context Herhangi bir context — getSystemService ActivityMgr'ye
  *                ulaşır. ApplicationContext yeterli.
+ * @param monitorDispatcher Flow'ların çalıştığı dispatcher (varsayılan IO).
+ * @param procMeminfoPath  /proc/meminfo dosya yolu (test için enjekte edilebilir).
+ * @param procStatPath     /proc/stat dosya yolu.
+ * @param procSelfStatPath /proc/self/stat dosya yolu.
+ * @param thermalBasePath  /sys/class/thermal dizin yolu.
  */
 class SystemMonitor(
-    context: Context
+    context: Context,
+    private val monitorDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val procMeminfoPath: String = "/proc/meminfo",
+    private val procStatPath: String = "/proc/stat",
+    private val procSelfStatPath: String = "/proc/self/stat",
+    private val thermalBasePath: String = "/sys/class/thermal",
 ) {
     /** 5-tuple — Kotlin stdlib'de yok, private data class. */
     private data class Quintuple<A, B, C, D, E>(
@@ -67,10 +82,6 @@ class SystemMonitor(
     companion object {
         private const val TAG = "SystemMonitor"
         private const val DEFAULT_INTERVAL_MS = 1000L
-        private const val PROC_MEMINFO_PATH = "/proc/meminfo"
-        private const val PROC_STAT_PATH = "/proc/stat"
-        private const val PROC_SELF_STAT_PATH = "/proc/self/stat"
-        private const val THERMAL_BASE_PATH = "/sys/class/thermal"
         private const val THERMAL_INTERVAL_MS = 2000L
         private const val THERMAL_FALLBACK_INTERVAL_MS = 3000L
     }
@@ -98,7 +109,7 @@ class SystemMonitor(
             emit(metrics)
             delay(intervalMs)
         }
-    }.flowOn(Dispatchers.IO)
+    }.flowOn(monitorDispatcher)
 
     /**
      * Tek seferlik RAM okuması — anlık snapshot gerektiğinde.
@@ -172,7 +183,7 @@ class SystemMonitor(
      */
     private fun readProcMeminfoSwap(): Pair<Long, Long> {
         return try {
-            val meminfoFile = File(PROC_MEMINFO_PATH)
+            val meminfoFile = File(procMeminfoPath)
             if (!meminfoFile.exists() || !meminfoFile.canRead()) {
                 Log.w(TAG, "/proc/meminfo not accessible — swap metrics will be 0")
                 return Pair(0L, 0L)
@@ -204,8 +215,10 @@ class SystemMonitor(
     /**
      * /proc/meminfo tarzı bir satırdan kB değerini parse eder.
      * Format: "SwapTotal:       12345678 kB"
+     *
+     * Testability: birim testler doğrudan çağırabilsin diye internal.
      */
-    private fun parseMeminfoKb(line: String): Long {
+    internal fun parseMeminfoKb(line: String): Long {
         return Regex("(\\d+)").find(line)?.value?.toLongOrNull() ?: 0L
     }
 
@@ -284,7 +297,7 @@ class SystemMonitor(
                 prevWallMs = currWallMs
             }
         }
-    }.flowOn(Dispatchers.IO)
+    }.flowOn(monitorDispatcher)
 
     /**
      * Tek seferlik CPU okuması — delta hesap için iki nokta gerekir.
@@ -302,6 +315,7 @@ class SystemMonitor(
 
     /**
      * Bir /proc/stat okuma anlık görüntüsü — delta için saklanır.
+     * Testability: computeCpuDelta internal olduğundan tür de internal olmalı.
      *
      * @param totalJiffies Tüm çekirdeklerin toplam jiffiesi (idle dahil)
      * @param totalIdleJiffies Tüm çekirdeklerin idle jiffiesi (idle+iowait)
@@ -312,7 +326,7 @@ class SystemMonitor(
      * @param uptimeJiffies /proc/stat ilk satır "btime" yok; cpu aggregate
      *                      toplamı uptime proxy'si olarak kullanılır
      */
-    private data class CpuSnapshot(
+    internal data class CpuSnapshot(
         val totalJiffies: Long,
         val totalIdleJiffies: Long,
         val perCoreTotal: List<Long>,
@@ -363,7 +377,7 @@ class SystemMonitor(
      */
     private fun readProcStat(): Quintuple<Long, Long, List<Long>, List<Long>, Int> {
         return try {
-            val statFile = File(PROC_STAT_PATH)
+            val statFile = File(procStatPath)
             if (!statFile.exists() || !statFile.canRead()) {
                 Log.w(TAG, "/proc/stat not accessible — CPU metrics empty")
                 return Quintuple(0L, 0L, emptyList(), emptyList(), 0)
@@ -443,7 +457,7 @@ class SystemMonitor(
      */
     private fun readProcSelfStat(): Long {
         return try {
-            val statFile = File(PROC_SELF_STAT_PATH)
+            val statFile = File(procSelfStatPath)
             if (!statFile.exists() || !statFile.canRead()) return 0L
 
             // Tüm satırı tek seferde oku — küçük dosya (~1KB)
@@ -491,8 +505,10 @@ class SystemMonitor(
      *   - delta_total <= 0 → 0% (erişilemedi ya da Çok hızlı okuma)
      *   - delta_idle > delta_total → clamp to 0% (clock skew nadir)
      *   - Liste boyutları farklı → zip'e güvenli (shorter list ekseninde)
+     *
+     * Testability: birim testler doğrudan çağırabilsin diye internal.
      */
-    private fun computeCpuDelta(prev: CpuSnapshot, curr: CpuSnapshot): CpuMetrics {
+    internal fun computeCpuDelta(prev: CpuSnapshot, curr: CpuSnapshot): CpuMetrics {
         // Aggregate delta
         val deltaTotal = (curr.totalJiffies - prev.totalJiffies).coerceAtLeast(0L)
         val deltaIdle = (curr.totalIdleJiffies - prev.totalIdleJiffies).coerceAtLeast(0L)
@@ -558,7 +574,7 @@ class SystemMonitor(
             emit(metrics)
             delay(if (zones.isEmpty()) THERMAL_FALLBACK_INTERVAL_MS else intervalMs)
         }
-    }.flowOn(Dispatchers.IO)
+    }.flowOn(monitorDispatcher)
 
     /**
      * Tek seferlik termal snapshot — debug/test için.
@@ -576,7 +592,7 @@ class SystemMonitor(
      */
     private fun readThermalSnapshot(): List<ThermalZoneReading> {
         return try {
-            val thermalDir = File(THERMAL_BASE_PATH)
+            val thermalDir = File(thermalBasePath)
             if (!thermalDir.exists() || !thermalDir.canRead()) {
                 Log.w(TAG, "/sys/class/thermal not accessible — thermal metrics empty")
                 return emptyList()
@@ -643,8 +659,10 @@ class SystemMonitor(
      *   "modem-therm"    → MODEM
      *
      * Substring match — case-sensitive, lowercase normalize.
+     *
+     * Testability: birim testler doğrudan çağırabilsin diye internal.
      */
-    private fun classifyThermalZone(typeRaw: String): ThermalZoneType {
+    internal fun classifyThermalZone(typeRaw: String): ThermalZoneType {
         val t = typeRaw.lowercase()
         return when {
             t.startsWith("cpu") || t.contains("cpu") -> ThermalZoneType.CPU_CORE
@@ -697,7 +715,8 @@ class SystemMonitor(
             allZoneReadings = zones,
             throttlingLevel = throttlingLevel,
             throttleWarning = throttleWarning,
-            timestamp = System.currentTimeMillis()
+            timestamp = System.currentTimeMillis(),
+            thermalStatus = -1
         )
     }
 
@@ -776,7 +795,8 @@ class SystemMonitor(
             allZoneReadings = emptyList(),
             throttlingLevel = thermalStatusToThrottleLevel(status),
             throttleWarning = thermalStatusToThrottleWarning(status),
-            timestamp = System.currentTimeMillis()
+            timestamp = System.currentTimeMillis(),
+            thermalStatus = status
         )
     }
 }

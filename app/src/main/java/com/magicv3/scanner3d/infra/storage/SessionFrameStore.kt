@@ -200,6 +200,17 @@ class SessionFrameStore(private val context: Context) {
         }
     }
 
+    /**
+     * H-6: Float dizisini API 28/29 uyumlu biçimde JSONArray'e çevirir.
+     * `JSONArray(FloatArray)` yapıcısı yalnızca API 30+ cihazlarda desteklenir;
+     * bu yardımcı her API seviyesinde güvenli çalışır.
+     */
+    private fun floatArrayToJsonArray(values: FloatArray): JSONArray {
+        val arr = JSONArray()
+        values.forEach { arr.put(it.toDouble()) }
+        return arr
+    }
+
     private suspend fun writeMeta(session: ScanSession) = withContext(Dispatchers.IO) {
         val framesArr = JSONArray()
         session.frames.forEach { f ->
@@ -210,8 +221,10 @@ class SessionFrameStore(private val context: Context) {
                 put("focalMm", f.focalMm.toDouble())
                 put("bytes", f.bytes)
                 put("capturedAtMs", f.capturedAtMs)
-                f.translation?.let { put("translation", JSONArray(it)) }
-                f.rotation?.let { put("rotation", JSONArray(it)) }
+                // H-6: JSONArray(FloatArray) API 30+ gerektirir (minSdk 28/29'da JSONException).
+                //      Float dizisini manuel Double dönüşümüyle çeviriyoruz.
+                f.translation?.let { put("translation", floatArrayToJsonArray(it)) }
+                f.rotation?.let { put("rotation", floatArrayToJsonArray(it)) }
             })
         }
         val root = JSONObject().apply {

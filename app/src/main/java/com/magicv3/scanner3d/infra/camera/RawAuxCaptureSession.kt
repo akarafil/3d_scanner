@@ -6,8 +6,9 @@ import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
-import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
+import android.hardware.camera2.params.ColorSpaceTransform
+import android.hardware.camera2.params.RggbChannelVector
 import android.hardware.camera2.params.StreamConfigurationMap
 import android.graphics.ImageFormat
 import android.media.Image
@@ -15,9 +16,11 @@ import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
+import android.util.Rational
 import android.util.Size
 import android.view.Surface
 import android.view.WindowManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -27,6 +30,8 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -50,6 +55,69 @@ import kotlin.coroutines.resumeWithException
  *   - Template: TEMPLATE_STILL_CAPTURE, AF=CONTINUOUS_PICTURE, AE auto-flash
  *   - Orientation read from default display at capture time.
  */
+
+/**
+ * Aux kamera kaynaklarının SIRALI kapanış sözleşmesi.
+ *
+ * Canonical order (Honor HAL `endConfigure:905 ... Unsupported set of inputs/outputs`
+ * asenkron yarışını önlemek için ZORUNLU):
+ *   1. captureSession.close() → StateCallback.onClosed BEKLENİR (2sn zaman aşımı)
+ *   2. imageReader.close()
+ *   3. cameraDevice.close()
+ *
+ * Neden bu sıra: Bazı HAL'ler (Honor Magic V3) session onClosed callback'i gelmeden
+ * ImageReader surface'ı yok edilirse `endConfigure:905` hatası üretir. Session tamamen
+ * kapanana kadar surface yaşatılır, sonra reader ve device kapatılır.
+ *
+ * Arayüz olarak ayrılmasının nedeni test edilebilirliktir: birim testler gerçek
+ * CameraCaptureSession olmadan kapanış sırasını doğrulayabilir.
+ */
+internal interface AuxResourceTeardown {
+    /**
+     * captureSession'i kapat ve StateCallback.onClosed gelene kadar blokla.
+     * [timeoutMs] içinde onClosed gelmezse veya close() atarsa `false` döner
+     * (çağıran yine de reader/device kapanışına devam eder — kilitlenme olmaz).
+     */
+    fun closeSession(timeoutMs: Long): Boolean
+
+    /** imageReader.close(). */
+    fun closeReader()
+
+    /** cameraDevice.close(). */
+    fun closeDevice()
+}
+
+/** Canonical kapanış adımları (test doğrulaması için). */
+internal enum class TeardownStep { SESSION, READER, DEVICE }
+
+/** Session onClosed için azami bekleme süresi (ms). */
+internal const val SESSION_CLOSE_TIMEOUT_MS = 2_000L
+
+/**
+ * Kapanış zincirini session → reader → device sırasıyla çalıştırır ve çalıştırılan
+ * adımların sırasını döndürür (birim test assertion'ları için).
+ *
+ * closeSession `false` dönse bile (onClosed gelmedi / zaman aşımı / close() hatası)
+ * kapanış devam eder: kilitlenme olmaz, reader ve device her koşulda kapatılır.
+ */
+internal fun closeInOrder(
+    teardown: AuxResourceTeardown,
+    timeoutMs: Long = SESSION_CLOSE_TIMEOUT_MS,
+): List<TeardownStep> {
+    val steps = mutableListOf<TeardownStep>()
+
+    steps += TeardownStep.SESSION
+    teardown.closeSession(timeoutMs)
+
+    steps += TeardownStep.READER
+    teardown.closeReader()
+
+    steps += TeardownStep.DEVICE
+    teardown.closeDevice()
+
+    return steps
+}
+
 class RawAuxCaptureSession(
     private val context: Context,
     private val cameraId: String = AUX_TELEPHOTO_ID,
@@ -79,6 +147,59 @@ class RawAuxCaptureSession(
     private var captureSize: Size? = null
 
     /**
+     * F1/MEDIUM-1: Session StateCallback.onClosed tetiklendiğinde çağrılır.
+     * closeQuietly, `close()`'un asenkron onClosed'unu CountDownLatch ile beklemek
+     * için bu listener'ı latch.countDown()'a bağlar.
+     *
+     * MEDIUM-1: Listener PER-SESSION kimlikle bağlanır — imza `((CameraCaptureSession) -> Unit)?`
+     * yapıldı. Bağlama sırasında (closeSession) beklenen session yakalanır; kimliği
+     * eşleşmeyen stale/geç onClosed'lar latch'i sayamaz (çapraz countDown yarışı önlenir).
+     *
+     * `@Volatile`: closeSession/open (IO thread) yazarken, StateCallback.onClosed handler
+     * thread'inde okuyabilir → cross-thread görünürlük için zorunlu.
+     */
+    @Volatile
+    private var onSessionClosedListener: ((CameraCaptureSession) -> Unit)? = null
+
+    /**
+     * MEDIUM-1: Per-session onClosed latch'i bağlar.
+     *
+     * [expectedSession] kimliğiyle gelen onClosed latch'i sayar; farklı bir session'ın
+     * stale/geç onClosed'u (ör. A session'ının onClosed'u B kapanırken ulaşırsa) latch'i
+     * sayamaz → HAL `endConfigure:905` yarışı yeniden tetiklenmez.
+     *
+     * Test edilebilirlik için internal (RawAuxCaptureSessionTest simüle eder).
+     */
+    internal fun bindSessionClosedLatch(
+        latch: CountDownLatch,
+        expectedSession: CameraCaptureSession,
+    ) {
+        onSessionClosedListener = { s -> if (s === expectedSession) latch.countDown() }
+    }
+
+    /**
+     * StateCallback.onClosed yolunu tetikler. Production'da open() içindeki callback'ten
+     * çağrılır; birim testler farklı session nesneleriyle simüle eder.
+     */
+    internal fun notifySessionClosed(session: CameraCaptureSession) {
+        onSessionClosedListener?.invoke(session)
+    }
+
+    /**
+     * MEDIUM-2 yardımcısı: [imageDeferred]'e tamamlanmış ama hiçbir consumer'ın
+     * okumadığı bir Image kalmışsa kapatır. Consumer iptal/zaman aşımı nedeniyle
+     * await()'ten dönemeden deferred complete edilmiş olabilir; bu native buffer
+     * sızıntısını önler. (getCompletedOrNull 1.8.1'de yok — isCompleted && !isCancelled
+     * guard'lı getCompleted() kullanılır; tamamlanmış deferred sonradan cancel olamaz,
+     * dolayısıyla race-free'dir.)
+     */
+    private fun closeAbandonedImage(imageDeferred: kotlinx.coroutines.CompletableDeferred<Image>) {
+        if (imageDeferred.isCompleted && !imageDeferred.isCancelled) {
+            runCatching { imageDeferred.getCompleted().close() }
+        }
+    }
+
+    /**
      * Open the aux camera, take ONE still frame, encode to JPEG, save to filesDir, return the File.
      * All resources closed in finally {} regardless of success or failure.
      */
@@ -86,10 +207,12 @@ class RawAuxCaptureSession(
         manualIso: Int? = null,
         manualExposureTimeNs: Long? = null,
         manualFocusDistance: Float? = null,
+        manualEv: Float? = null,
+        manualColorTemperature: Int? = null,
     ): Result<File> = withContext(Dispatchers.IO) {
         try {
             open()
-            val file = captureFrame(manualIso, manualExposureTimeNs, manualFocusDistance)
+            val file = captureFrame(manualIso, manualExposureTimeNs, manualFocusDistance, manualEv, manualColorTemperature)
             Result.success(file)
         } catch (t: Throwable) {
             Log.e(TAG, "[$cameraId] capture failed: ${t.javaClass.simpleName}: ${t.message}", t)
@@ -113,6 +236,9 @@ class RawAuxCaptureSession(
         val reader = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, MAX_IMAGES)
         imageReader = reader
 
+        // F1: Yeni session açılırken eski session'ın stale onClosed listener'ını temizle.
+        onSessionClosedListener = null
+
         val session = suspendCancellableCoroutine<CameraCaptureSession> { cont ->
             cam.createCaptureSession(
                 listOf<Surface>(reader.surface),
@@ -131,6 +257,15 @@ class RawAuxCaptureSession(
                     override fun onReady(s: CameraCaptureSession) {
                         Log.d(TAG, "[$cameraId] session onReady")
                     }
+
+                    override fun onClosed(s: CameraCaptureSession) {
+                        // F1/MEDIUM-1: Sıralı kapanış zinciri bu callback'i bekler
+                        // (close(callback) public API değil; bu yüzden listener üzerinden bağlanır).
+                        // Kimlik (`s`) listener'a iletilir; latch'i yalnızca closeSession'ın
+                        // beklediği session sayar (başka session'ın stale onClosed'u sayamaz).
+                        Log.d(TAG, "[$cameraId] session onClosed — yüzey artık güvenle yok edilebilir")
+                        notifySessionClosed(s)
+                    }
                 },
                 handler
             )
@@ -146,6 +281,8 @@ class RawAuxCaptureSession(
         manualIso: Int? = null,
         manualExposureTimeNs: Long? = null,
         manualFocusDistance: Float? = null,
+        manualEv: Float? = null,
+        manualColorTemperature: Int? = null,
     ): File = withContext(Dispatchers.IO) {
         val cam = cameraDevice ?: throw IllegalStateException("[$cameraId] Camera not opened. Call open() first.")
         val session = captureSession ?: throw IllegalStateException("[$cameraId] Capture session not active. Call open() first.")
@@ -153,6 +290,17 @@ class RawAuxCaptureSession(
         val size = captureSize ?: throw IllegalStateException("[$cameraId] Capture size not selected. Call open() first.")
 
         val imageDeferred = kotlinx.coroutines.CompletableDeferred<Image>()
+
+        // MEDIUM-2: Deferred iptal edilirse (timeout / dış iptal) içinde tamamlanmış ama
+        // hiçbir consumer'ın okumadığı Image varsa kapatılır → ~18MB'lık 12MP YUV native
+        // buffer sızdırılmaz. Normal başarı yolunda cause == null → dokunulmaz (tüketici
+        // finally'de kapatır). `cancel()` sonrası isCompleted == true olduğu için geç gelen
+        // kare onImageAvailable else dalında (img.close()) kapanır.
+        imageDeferred.invokeOnCompletion { cause ->
+            if (cause != null) {
+                closeAbandonedImage(imageDeferred)
+            }
+        }
 
         reader.setOnImageAvailableListener({ r ->
             val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
@@ -176,6 +324,37 @@ class RawAuxCaptureSession(
                 Log.i(TAG, "[$cameraId] Pozlama kilitlendi: ISO=$manualIso, Enstantane=${manualExposureTimeNs}ns")
             } else {
                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH)
+            }
+
+            // EV kompanzasyonu — yalnızca AE AUTO iken uygulanır.
+            // (Manual ISO + enstantane verildiğinde AE OFF olduğundan EV işlevsizdir;
+            // bu yüzden manualEv değeri o durumda yok sayılır — mevcut manuel dal değişmez.)
+            if ((manualIso == null || manualExposureTimeNs == null) && manualEv != null) {
+                val step = ProCameraCapabilities.readAeCompensationStep(cameraManager, cameraId)
+                val range = ProCameraCapabilities.readAeCompensationRange(cameraManager, cameraId)
+                val units = ProCameraCapabilities.evToCameraUnits(manualEv, step, range.first, range.last)
+                set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, units)
+                Log.i(TAG, "[$cameraId] EV uygulandı: $manualEv EV → $units")
+            }
+
+            // WB / renk sıcaklığı (manuel Kelvin) — AWB OFF + transform matrisi.
+            // null iken AWB otomatik kalır (AWB anahtarlarına dokunulmaz).
+            if (manualColorTemperature != null) {
+                val (rGain, bGain) = ProCameraCapabilities.kelvinToRgbGains(manualColorTemperature)
+                set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
+                set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)
+                set(CaptureRequest.COLOR_CORRECTION_GAINS, RggbChannelVector(rGain, 1f, 1f, bGain))
+                set(
+                    CaptureRequest.COLOR_CORRECTION_TRANSFORM,
+                    ColorSpaceTransform(
+                        arrayOf(
+                            Rational(1, 1), Rational(0, 1), Rational(0, 1),
+                            Rational(0, 1), Rational(1, 1), Rational(0, 1),
+                            Rational(0, 1), Rational(0, 1), Rational(1, 1),
+                        )
+                    )
+                )
+                Log.i(TAG, "[$cameraId] WB manuel: ${manualColorTemperature}K → gains(r=$rGain,b=$bGain)")
             }
 
             // AF control
@@ -226,11 +405,33 @@ class RawAuxCaptureSession(
                 handler,
             )
 
-            val image = imageDeferred.await()
-            val jpegBytes = yuv420ToJpeg(image, size.width, size.height)
-            image.close()
-            saveJpeg(jpegBytes, cameraId)
+            // MEDIUM-2: await iptal edilirse (timeout / dış iptal → CancellationException)
+            // deferred'e tamamlanmış ama okunmamış Image kalmışsa kapatılır; deferred iptal
+            // edilir ki geç gelen kare onImageAvailable else dalında (img.close()) kapansın.
+            val image = try {
+                imageDeferred.await()
+            } catch (e: CancellationException) {
+                imageDeferred.cancel(e)
+                closeAbandonedImage(imageDeferred)
+                throw e
+            }
+
+            // MEDIUM-2: JPEG kodlama/save başarılı olsun ya da olmasın (veya tam bu sırada
+            // timeout iptali olsa bile) native Image buffer finally'de kapatılır — mevcut
+            // `image.close()` çağrısı buraya taşındı, tek sefer çalışır (idempotent değil;
+            // bu yüzden only-here).
+            try {
+                val jpegBytes = yuv420ToJpeg(image, size.width, size.height)
+                saveJpeg(jpegBytes, cameraId)
+            } finally {
+                runCatching { image.close() }
+            }
         } ?: run {
+            // MEDIUM-2: Timeout yolunda deferred hâlâ aktifse iptal et → geç kareler else
+            // dalında kapanır; tamamlanmış okunmamış Image varsa burada kapatılır.
+            // (Tekrarlı timeout'ta native buffer sızıntısı önlenir.)
+            if (imageDeferred.isActive) imageDeferred.cancel()
+            closeAbandonedImage(imageDeferred)
             Log.e(TAG, "[$cameraId] capture timed out after ${CAPTURE_TIMEOUT_MS}ms")
             throw IOException("capture timeout for id=$cameraId")
         }
@@ -331,7 +532,15 @@ class RawAuxCaptureSession(
 
     // ───────────────────────── 5. YUV_420_888 → NV21 → JPEG ─────────────────────────
 
-    private fun yuv420ToJpeg(image: Image, width: Int, height: Int): ByteArray {
+    /**
+     * YUV_420_888 → NV21 byte düzeni.
+     *
+     * B6: U ve V plane'lerinin rowStride/pixelStride'i ayrı ayrı kullanılır;
+     * bounds check U için uBuf.capacity(), V için vBuf.capacity() ile yapılır
+     * (U/V stride'ları farklıysa chroma doğru konumlanır).
+     * Testability: Robolectric NV21 düzenini byte-byte doğrulayabilsin diye internal.
+     */
+    internal fun yuv420ToNv21(image: Image, width: Int, height: Int): ByteArray {
         require(image.format == ImageFormat.YUV_420_888) { "expected YUV_420_888" }
 
         val yPlane = image.planes[0]
@@ -352,15 +561,18 @@ class RawAuxCaptureSession(
             yBuf.get(nv21, row * width, width)
         }
 
-        val uvRowStride = vPlane.rowStride
-        val uvPixelStride = vPlane.pixelStride
+        // B6: U ve V için ayrı stride/pixelStride; U bounds uBuf, V bounds vBuf.
+        val uRowStride = uPlane.rowStride
+        val uPixelStride = uPlane.pixelStride
+        val vRowStride = vPlane.rowStride
+        val vPixelStride = vPlane.pixelStride
         var uvOffset = width * height
 
         // UV Interleaved (NV21 formatında V önce, U sonra gelir)
         for (row in 0 until height / 2) {
             for (col in 0 until width / 2) {
-                val vIdx = row * uvRowStride + col * uvPixelStride
-                val uIdx = row * uvRowStride + col * uvPixelStride
+                val vIdx = row * vRowStride + col * vPixelStride
+                val uIdx = row * uRowStride + col * uPixelStride
                 val vVal = if (vIdx < vBuf.capacity()) vBuf.get(vIdx) else 0.toByte()
                 val uVal = if (uIdx < uBuf.capacity()) uBuf.get(uIdx) else 0.toByte()
                 nv21[uvOffset++] = vVal
@@ -368,13 +580,28 @@ class RawAuxCaptureSession(
             }
         }
 
+        return nv21
+    }
+
+    /**
+     * YUV_420_888 → NV21 → JPEG.
+     *
+     * NV21 düzeni [yuv420ToNv21]'de üretilir; kodlama `YuvImage.compressToJpeg` ile yapılır.
+     * Testability: birim testler doğrudan çağırabilsin diye internal.
+     */
+    internal fun yuv420ToJpeg(image: Image, width: Int, height: Int): ByteArray {
+        val nv21 = yuv420ToNv21(image, width, height)
+
         val yuvImage = android.graphics.YuvImage(nv21, ImageFormat.NV21, width, height, null)
         val out = ByteArrayOutputStream()
-        yuvImage.compressToJpeg(
+        val compressed = yuvImage.compressToJpeg(
             android.graphics.Rect(0, 0, width, height),
             92,
             out,
         )
+        if (!compressed) {
+            throw IllegalStateException("compressToJpeg failed for ${width}x$height")
+        }
         return out.toByteArray()
     }
 
@@ -388,36 +615,72 @@ class RawAuxCaptureSession(
     // ───────────────────────── 6. Cleanup ─────────────────────────
 
     private fun closeQuietly() {
-        try {
-            captureSession?.let {
-                runCatching { it.close() }
-                    .onFailure { e -> Log.w(TAG, "session.close() failed: ${e.message}") }
-            }
-            captureSession = null
-        } catch (e: Throwable) {
-            Log.w(TAG, "session close threw: ${e.message}")
-        }
+        // F1: SIRALI kapanış — session.onClosed BEKLENEREK yüzey yarışı önlenir.
+        // Honor HAL'inde `endConfigure:905 ... Unsupported set of inputs/outputs` hatası,
+        // session onClosed gelmeden ImageReader surface'ı yok edilirse oluşur.
+        // Sıra: captureSession → imageReader → cameraDevice.
+        closeInOrder(
+            teardown = object : AuxResourceTeardown {
+                override fun closeSession(timeoutMs: Long): Boolean {
+                    val session = captureSession ?: return true
+                    captureSession = null
+                    val onClosed = CountDownLatch(1)
+                    // MEDIUM-1: latch yalnızca BEKLENEN session'ın onClosed'u ile sayılır.
+                    // Önceki tek global `{ onClosed.countDown() }` bağlama, A session'ının
+                    // geç onClosed'u B session'ı kapanırken ulaşırsa B'nin latch'ini erken
+                    // sayabiliyordu (reader/device henüz hazır değilken kapanıyordu).
+                    // Per-session identity (`s === session`) ile stale callback'ler yok sayılır.
+                    // Not: onClosed içinde `s === captureSession` kontrolü işe YARAMAZ çünkü
+                    // burada captureSession alanı zaten null yapıldı; kontrol beklenen session'a
+                    // (yerel değişken) karşı yapılır.
+                    bindSessionClosedLatch(onClosed, session)
+                    return try {
+                        // Asenkron: onClosed handler thread'de tetiklenir, bu thread (IO)
+                        // latch.await ile bekler. Kilitlenme yok: onClosed gelmezse timeout.
+                        session.close()
+                        val closed = onClosed.await(timeoutMs, TimeUnit.MILLISECONDS)
+                        if (closed) {
+                            Log.d(TAG, "[$cameraId] session kapanışı onClosed ile onaylandı")
+                        } else {
+                            Log.w(TAG, "[$cameraId] session onClosed $timeoutMs ms içinde gelmedi (zaman aşımı) — devam")
+                        }
+                        closed
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "[$cameraId] session.close() failed: ${e.message}")
+                        false
+                    } finally {
+                        onSessionClosedListener = null
+                    }
+                }
 
-        try {
-            imageReader?.let {
-                runCatching { it.close() }
-                    .onFailure { e -> Log.w(TAG, "imageReader.close() failed: ${e.message}") }
-            }
-            imageReader = null
-        } catch (e: Throwable) {
-            Log.w(TAG, "imageReader close threw: ${e.message}")
-        }
+                override fun closeReader() {
+                    try {
+                        imageReader?.let {
+                            runCatching { it.close() }
+                                .onFailure { e -> Log.w(TAG, "imageReader.close() failed: ${e.message}") }
+                        }
+                        imageReader = null
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "imageReader close threw: ${e.message}")
+                    }
+                }
 
-        try {
-            cameraDevice?.let { cam ->
-                runCatching { cam.close() }
-                    .onFailure { e -> Log.w(TAG, "cameraDevice.close() failed: ${e.message}") }
+                override fun closeDevice() {
+                    try {
+                        cameraDevice?.let { cam ->
+                            runCatching { cam.close() }
+                                .onFailure { e -> Log.w(TAG, "cameraDevice.close() failed: ${e.message}") }
+                        }
+                        cameraDevice = null
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "cameraDevice close threw: ${e.message}")
+                    }
+                }
             }
-            cameraDevice = null
-        } catch (e: Throwable) {
-            Log.w(TAG, "cameraDevice close threw: ${e.message}")
-        }
+        )
 
+        // Handler thread'in kapanışı 500ms ertelenir: capture/close callbacks hâlâ
+        // bu thread'de dönüyor olabilir. Mevcut davranış korunur.
         handler?.postDelayed({
             stopHandlerThread()
         }, 500L)

@@ -52,13 +52,18 @@ fun SystemHud(
         SystemMonitor(context.applicationContext)
     }
 
+    // O-8: Cold flow'ları hoist et — doğrudan inline oluşturulurlarsa her
+    // recomposition'da yeni bir cold flow üretilir ve collect baştan başlar
+    // (polling yeniden başlar, ilk saniye EMPTY görünür). remember ile bir kez
+    // kurulur; collectAsStateWithLifecycle lifecycle-aware başlat/durdurur.
+    val ramFlow = remember(systemMonitor) { systemMonitor.monitorRam(intervalMs = 1000) }
+    val cpuFlow = remember(systemMonitor) { systemMonitor.monitorCpu(intervalMs = 1000) }
+    val thermalFlow = remember(systemMonitor) { systemMonitor.monitorThermal(intervalMs = 2000) }
+
     // Üç metrik flow'larını lifecycle-aware topla
-    val ram: RamMetrics by systemMonitor.monitorRam(intervalMs = 1000)
-        .collectAsStateWithLifecycle(initialValue = RamMetrics.EMPTY)
-    val cpu: CpuMetrics by systemMonitor.monitorCpu(intervalMs = 1000)
-        .collectAsStateWithLifecycle(initialValue = CpuMetrics.EMPTY)
-    val thermal: ThermalMetrics by systemMonitor.monitorThermal(intervalMs = 2000)
-        .collectAsStateWithLifecycle(initialValue = ThermalMetrics.EMPTY)
+    val ram: RamMetrics by ramFlow.collectAsStateWithLifecycle(initialValue = RamMetrics.EMPTY)
+    val cpu: CpuMetrics by cpuFlow.collectAsStateWithLifecycle(initialValue = CpuMetrics.EMPTY)
+    val thermal: ThermalMetrics by thermalFlow.collectAsStateWithLifecycle(initialValue = ThermalMetrics.EMPTY)
 
     // HUD Container — yarı saydam arkaplan, rounded
     Surface(

@@ -141,6 +141,15 @@ fun MagicScannerApp() {
                             currentScreen = Screen.Scan(liveSession)
                         },
                         onStart3DRender = {
+                            // Dürüst ön-kontrol: AlgorDroid Engine kurulu değilse paylaşım
+                            // yedeği kullanılacağı net bir Toast ile bildirilir.
+                            if (!ingestionQueue.isRenderEngineInstalled()) {
+                                android.widget.Toast.makeText(
+                                    context,
+                                    "AlgorDroid Engine kurulu değil — M3SP paylaşım yedeği kullanılacak.",
+                                    android.widget.Toast.LENGTH_LONG
+                                ).show()
+                            }
                             scope.launch {
                                 store.updateStatus(liveSession.sessionId, ScanStatus.RENDERING)
                                 ingestionQueue.enqueue(liveSession)

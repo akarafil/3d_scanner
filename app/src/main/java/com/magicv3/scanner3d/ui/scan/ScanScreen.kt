@@ -1,5 +1,6 @@
 package com.magicv3.scanner3d.ui.scan
 
+import android.util.Log
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -11,7 +12,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -26,6 +26,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,9 +44,13 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.magicv3.scanner3d.domain.ar.CameraPose
+import com.magicv3.scanner3d.domain.ar.DepthSourceState
 import com.magicv3.scanner3d.ui.capture.CaptureButton
 import com.magicv3.scanner3d.ui.hud.SystemHud
 
@@ -64,6 +69,11 @@ fun ScanScreen(
     val isoValue by viewModel.isoValue.collectAsStateWithLifecycle()
     val shutterFraction by viewModel.shutterFraction.collectAsStateWithLifecycle()
     val focusDistanceValue by viewModel.focusDistanceValue.collectAsStateWithLifecycle()
+    val evValue by viewModel.evValue.collectAsStateWithLifecycle()
+    val colorTempValue by viewModel.colorTempValue.collectAsStateWithLifecycle()
+    val isoRange by viewModel.isoRange.collectAsStateWithLifecycle()
+    val evRange by viewModel.evRange.collectAsStateWithLifecycle()
+    val evStep by viewModel.evStep.collectAsStateWithLifecycle()
     val multiLensMode by viewModel.multiLensMode.collectAsStateWithLifecycle()
     val showMyScans by viewModel.showMyScans.collectAsStateWithLifecycle()
     val openedSession by viewModel.openedSession.collectAsStateWithLifecycle()
@@ -71,73 +81,155 @@ fun ScanScreen(
     val plyExportState by viewModel.plyExportState.collectAsStateWithLifecycle()
     val isThermalThrottled by viewModel.isThermalThrottled.collectAsStateWithLifecycle()
     val currentSocTemp by viewModel.currentSocTemp.collectAsStateWithLifecycle()
+    val isThermalWarned by viewModel.isThermalWarned.collectAsStateWithLifecycle()
+    val yoloModelLoaded by viewModel.yoloModelLoaded.collectAsStateWithLifecycle()
+
+    // B-3: ARCore kullanılabilirlik durumu (renderer oluşturma öncesi kontrol).
+    val arCoreState by viewModel.arCoreState.collectAsStateWithLifecycle()
+
+    // F2: aktif depth kaynağı durumu (dürüst izleme — ArGlRenderer'a bildirilir).
+    val depthSourceState by viewModel.depthSourceState.collectAsStateWithLifecycle()
 
     // AI states
     val aiPreviewMode by viewModel.aiPreviewMode.collectAsStateWithLifecycle()
     val aiStats by viewModel.aiStats.collectAsStateWithLifecycle()
     val depthHeatmap by viewModel.depthHeatmap.collectAsStateWithLifecycle()
     val yoloDetections by viewModel.yoloDetections.collectAsStateWithLifecycle()
+    val pointCount by viewModel.pointCount.collectAsStateWithLifecycle()
 
     val progressState by viewModel.orchestrator.progress.collectAsStateWithLifecycle()
     val ingestionState by viewModel.ingestionQueue.queueState.collectAsStateWithLifecycle()
 
     var latestCameraPose by remember { mutableStateOf<CameraPose?>(null) }
-    val arSurfaceView = remember {
-        ArPointCloudSurfaceView(context) { pose ->
-            latestCameraPose = pose
+
+    // B-3: ARCore desteklenmiyorsa AR surface view oluşturulmaz — fallback mesajı gösterilir.
+    val arSurfaceView = remember(arCoreState) {
+        if (arCoreState == ArCoreAvailabilityState.Available) {
+            ArPointCloudSurfaceView(context) { pose ->
+                latestCameraPose = pose
+            }.also { surface ->
+                surface.renderer.onArCoreUnavailable = { reason ->
+                    viewModel.reportArCoreUnavailable(reason)
+                }
+                // F2: renderer depth kaynağı durumunu loglar; bu callback ile üst katmana
+                // (denetim izi / gelecekte UI göstergesi) iletir. Sessiz yutma yok.
+                surface.renderer.onDepthSourceStateChanged = { state ->
+                    Log.d("ScanScreen", "Depth source state: ${state.name}")
+                }
+            }
+        } else {
+            null
         }
     }
 
-    DisposableEffect(Unit) {
-        arSurfaceView.renderer.onFrameAvailable = { frame ->
-            viewModel.onFrameAvailable(frame)
+    // F2: ViewModel hangi depth kaynağının ürettiğini renderer'a bildirir; renderer
+    // durumu loglar ve kendi callback'i ile üst katmana iletir. (UI göstergesi şart
+    // değildir — loglama + durum alanı yeterli, bkz. ArGlRenderer.updateDepthSourceState.)
+    LaunchedEffect(depthSourceState) {
+        arSurfaceView?.renderer?.updateDepthSourceState(depthSourceState)
+    }
+
+    // O-5: GLSurfaceView onPause/onResume lifecycle'a bağlanır — uygulama arka
+    // plana gidince GL thread durur (WHEN_DIRTY + paused = pil tasarrufu), geri
+    // gelince render döngüsü yeniden başlar.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(arSurfaceView, lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> arSurfaceView?.onPause()
+                Lifecycle.Event.ON_RESUME -> arSurfaceView?.onResume()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+
+        if (arSurfaceView != null) {
+            arSurfaceView.renderer.onFrameAvailable = { frame ->
+                viewModel.onFrameAvailable(frame)
+            }
         }
         onDispose {
-            arSurfaceView.renderer.onFrameAvailable = null
-            arSurfaceView.onDestroy()
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            arSurfaceView?.renderer?.onFrameAvailable = null
+            arSurfaceView?.renderer?.onArCoreUnavailable = null
+            arSurfaceView?.renderer?.onDepthSourceStateChanged = null
+            arSurfaceView?.onDestroy()
         }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        AndroidView(
-            factory = { arSurfaceView },
-            modifier = Modifier.fillMaxSize()
-        )
+        // AR core mevcutken AR overlay'i çiz; değilse yalnızca fallback banner görünür.
+        if (arSurfaceView != null) {
+            AndroidView(
+                factory = { arSurfaceView },
+                modifier = Modifier.fillMaxSize()
+            )
+        }
 
         // YOLOv8 Bounding Boxes Canvas Overlay
         if (aiPreviewMode == AIPreviewMode.YOLO) {
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                val canvasW = size.width
-                val canvasH = size.height
+            if (!yoloModelLoaded) {
+                // YOLOv8 modeli yüklü değil — sahte tespit kutusu gösterilmez.
+                Text(
+                    text = "⚠️ YOLOv8 modeli yüklü değil — gerçek tespit kapalı",
+                    color = Color(0xFFFFCC00),
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 64.dp)
+                        .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                )
+            } else {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val canvasW = size.width
+                    val canvasH = size.height
 
-                yoloDetections.forEach { det ->
-                    val rect = det.boundingBox
-                    val left = rect.left * canvasW
-                    val top = rect.top * canvasH
-                    val right = rect.right * canvasW
-                    val bottom = rect.bottom * canvasH
+                    yoloDetections.forEach { det ->
+                        val rect = det.boundingBox
+                        val left = rect.left * canvasW
+                        val top = rect.top * canvasH
+                        val right = rect.right * canvasW
+                        val bottom = rect.bottom * canvasH
 
-                    // Draw cyan stroke box
-                    drawRect(
-                        color = Color.Cyan,
-                        topLeft = Offset(left, top),
-                        size = Size(right - left, bottom - top),
-                        style = Stroke(width = 3.dp.toPx())
-                    )
+                        // Draw cyan stroke box
+                        drawRect(
+                            color = Color.Cyan,
+                            topLeft = Offset(left, top),
+                            size = Size(right - left, bottom - top),
+                            style = Stroke(width = 3.dp.toPx())
+                        )
 
-                    // Draw label text
-                    val label = "Target Object (${(det.confidence * 100).toInt()}%)"
-                    val paint = android.graphics.Paint().apply {
-                        color = android.graphics.Color.CYAN
-                        textSize = 38f
-                        isAntiAlias = true
-                        typeface = android.graphics.Typeface.DEFAULT_BOLD
-                    }
-                    drawIntoCanvas { canvas ->
-                        canvas.nativeCanvas.drawText(label, left + 8f, top + 42f, paint)
+                        // Draw label text
+                        val label = "Target Object (${(det.confidence * 100).toInt()}%)"
+                        val paint = android.graphics.Paint().apply {
+                            color = android.graphics.Color.CYAN
+                            textSize = 38f
+                            isAntiAlias = true
+                            typeface = android.graphics.Typeface.DEFAULT_BOLD
+                        }
+                        drawIntoCanvas { canvas ->
+                            canvas.nativeCanvas.drawText(label, left + 8f, top + 42f, paint)
+                        }
                     }
                 }
             }
+        }
+
+        // Termal uyarı banner'ı (çekim engellenmez, yalnızca AI hızı düşürülür).
+        if (isThermalWarned && !isThermalThrottled) {
+            Text(
+                text = "🌡️ Sıcaklık yüksek (%.0f°C) — AI hızı düşürüldü".format(currentSocTemp),
+                color = Color(0xFFFFCC00),
+                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 108.dp)
+                    .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 10.dp, vertical = 4.dp)
+            )
         }
 
         SystemHud(
@@ -160,6 +252,36 @@ fun ScanScreen(
                     .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
                     .padding(horizontal = 6.dp, vertical = 2.dp)
             )
+        }
+
+        // Clear Accumulated Points Cyberpunk Button (Depth mode & pointCount > 0)
+        if (aiPreviewMode == AIPreviewMode.DEPTH && pointCount > 0) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = 12.dp, top = 132.dp)
+                    .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(6.dp))
+                    .border(width = 1.dp, color = Color.Cyan, shape = RoundedCornerShape(6.dp))
+                    .clickable { viewModel.clearAccumulatedPoints() }
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(6.dp)
+                            .background(Color.Cyan, CircleShape)
+                    )
+                    Text(
+                        text = "Noktaları Temizle ($pointCount)",
+                        color = Color.Cyan,
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+            }
         }
 
         // Toggle Mode Selector (TopCenter)
@@ -295,9 +417,32 @@ fun ScanScreen(
                 onShutterChange = { viewModel.setShutterFraction(it) },
                 onFocusChange = { viewModel.setFocusDistanceValue(it) },
                 onLockToggle = { viewModel.setSettingsLocked(!isSettingsLocked) },
+                evValue = evValue,
+                onEvChange = { viewModel.setEvValue(it) },
+                colorTempValue = colorTempValue,
+                onColorTempChange = { viewModel.setColorTemperature(it) },
+                isoRange = isoRange,
+                evRange = evRange,
+                evStep = evStep,
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
                     .padding(end = 16.dp)
+            )
+        }
+
+        // Pro ayarlar durum çipi (Batch-3) — mevcut banner'ların altında, üst-orta.
+        // Yalnızca pro panel açıkken gösterilir (pro modu kapalıyken ARCore banner'ı ile çakışmayı önler).
+        if (proControlsEnabled) {
+            Text(
+                text = if (isSettingsLocked) viewModel.appliedSettingsSummary() else String.format(java.util.Locale.US, "EV %+.1f", evValue),
+                color = if (isSettingsLocked) Color(0xFFFFCC00) else Color.White,
+                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 150.dp)
+                    .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
             )
         }
 
@@ -329,13 +474,43 @@ fun ScanScreen(
             }
         }
 
+        // B-3: ARCore yokken kullanıcıya anlamlı fallback durumu göster (sessiz yutma yok).
+        when (val state = arCoreState) {
+            is ArCoreAvailabilityState.Unavailable -> {
+                Text(
+                    text = "⚠ ARCore kullanılamıyor: ${state.reason}",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 120.dp)
+                        .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                )
+            }
+            ArCoreAvailabilityState.Checking -> {
+                Text(
+                    text = "ARCore kontrol ediliyor…",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 120.dp)
+                        .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                )
+            }
+            ArCoreAvailabilityState.Available -> Unit
+        }
+
         // Capture Button
         CaptureButton(
             state = captureState,
             onClick = {
                 viewModel.triggerCapture(
-                    pauseArCallback = { arSurfaceView.onPause() },
-                    resumeArCallback = { arSurfaceView.onResume() },
+                    pauseArCallback = { arSurfaceView?.onPause() },
+                    resumeArCallback = { arSurfaceView?.onResume() },
                     latestCameraPose = latestCameraPose
                 )
             },

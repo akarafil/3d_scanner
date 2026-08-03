@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.util.Log
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.GpuDelegate
+import org.tensorflow.lite.nnapi.NnApiDelegate
 import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -14,41 +15,118 @@ class DepthInferenceEngine(private val context: Context) {
 
     companion object {
         private const val TAG = "DepthInferenceEngine"
-        private const val MODEL_NAME = "depth_anything_small.tflite"
-        private const val INPUT_SIZE = 518 // Standard Depth Anything Small resolution
+
+        // Isim dürüstlüğü: Qualcomm'un sağladığı model Depth-Anything-V2'nin **Small** varyantıdır
+        // (24.7M parametre, 518x518 giriş). Sabit, assets'teki gerçek dosya adıyla birebir eşleşir.
+        // NOT: ViT-Base varyantı (depth_anything_v2_vitb.tflite) KULLANILMIYOR — eski kod hatalıydı.
+        internal const val MODEL_NAME = "depth_anything_v2_small.tflite"
+        private const val INPUT_SIZE = 518 // Depth-Anything-V2 Small giriş çözünürlüğü (518x518)
+
+        // Depth-Anything-V2 Small imza beklentileri (NHWC düzeni).
+        // init'te gerçek tensörlerle karşılaştırılır; uyumsuzlukta model düşürülmez, uyarı loglanır.
+        internal val EXPECTED_INPUT_SHAPE = intArrayOf(1, 518, 518, 3)
+        internal val EXPECTED_OUTPUT_SHAPE = intArrayOf(1, 518, 518, 1)
     }
 
     private var interpreter: Interpreter? = null
+    private var nnApiDelegate: NnApiDelegate? = null
     private var gpuDelegate: GpuDelegate? = null
     var isNpuOrGpuAccelerated = false
         private set
+
+    /** Model assets'ten başarıyla yüklendi mi? (dürüst göstergesi — mock/sahte çıktı üretilmez) */
+    val isModelLoaded: Boolean
+        get() = interpreter != null
 
     init {
         try {
             val modelBuffer = loadModelFile(context, MODEL_NAME)
             val options = Interpreter.Options().apply {
                 try {
-                    val delegate = GpuDelegate()
+                    val delegate = NnApiDelegate()
                     addDelegate(delegate)
-                    gpuDelegate = delegate
+                    nnApiDelegate = delegate
                     isNpuOrGpuAccelerated = true
-                    Log.i(TAG, "DepthInferenceEngine: GPU acceleration active.")
+                    Log.i(TAG, "DepthInferenceEngine: NPU (NNAPI / Hexagon) acceleration active.")
                 } catch (t: Throwable) {
-                    Log.w(TAG, "DepthInferenceEngine: GPU failed, fallback to CPU. ${t.message}")
+                    Log.w(TAG, "DepthInferenceEngine: NPU (NNAPI) failed, trying GPU fallback. ${t.message}")
+                    try {
+                        val delegate = GpuDelegate()
+                        addDelegate(delegate)
+                        gpuDelegate = delegate
+                        isNpuOrGpuAccelerated = true
+                        Log.i(TAG, "DepthInferenceEngine: GPU acceleration active.")
+                    } catch (t2: Throwable) {
+                        Log.w(TAG, "DepthInferenceEngine: GPU failed, fallback to CPU. ${t2.message}")
+                    }
                 }
                 setNumThreads(4)
             }
             interpreter = Interpreter(modelBuffer, options)
             Log.i(TAG, "DepthInferenceEngine: Model $MODEL_NAME loaded successfully.")
+
+            // İmza doğrulama: giriş/çıkış tensör şekilleri Small varyantıyla eşleşiyor mu?
+            // Eşleşirse bilgilendirici log; eşleşmezse uyarı (model yine de çalıştırılır ama
+            // preprocessing gözden geçirilmelidir). Tensor okuma hatası init'i crash ettirmez.
+            interpreter?.let { validateModelSignature(it) }
         } catch (e: Exception) {
-            Log.w(TAG, "DepthInferenceEngine: $MODEL_NAME not found in assets, running in MOCK mode. ${e.message}")
+            Log.w(TAG, "DepthInferenceEngine: $MODEL_NAME not found in assets, running with no depth output. ${e.message}")
         }
     }
+
+    /**
+     * Model giriş/çıkış tensör imzalarını okur ve beklenen Small varyantı şekilleriyle
+     * karşılaştırır. init sırasında çağrılır; uyumsuzluk durumunda uyarı loglanır ancak
+     * model düşürülmez (inference yine de çalıştırılabilir, preprocessing gözden geçirilmelidir).
+     *
+     * Bazı sağlayıcılarda getInputTensor/getOutputTensor Exception fırlatabilir; bu durumda
+     * crash yerine Log.w ile yutulur ve false döner.
+     *
+     * @return imzalar beklenen şekillerle birebir uyumluysa true.
+     */
+    internal fun validateModelSignature(interpreter: Interpreter): Boolean = try {
+        val inputShape = interpreter.getInputTensor(0).shape()
+        val outputShape = interpreter.getOutputTensor(0).shape()
+        val ok = isSignatureExpected(inputShape, outputShape)
+        if (ok) {
+            Log.i(
+                TAG,
+                "Depth model imzaları doğrulandı: input=${inputShape.contentToString()}, output=${outputShape.contentToString()}"
+            )
+        } else {
+            Log.w(
+                TAG,
+                "Depth model imza uyarısı: input=${inputShape.contentToString()}, output=${outputShape.contentToString()} " +
+                    "— beklenen input=${EXPECTED_INPUT_SHAPE.contentToString()}, output=${EXPECTED_OUTPUT_SHAPE.contentToString()}. " +
+                    "Preprocessing gözden geçirilmelidir."
+            )
+        }
+        ok
+    } catch (t: Throwable) {
+        Log.w(TAG, "Depth model imza doğrulaması yapılamadı (tensor okuma hatası): ${t.message}")
+        false
+    }
+
+    /**
+     * Verilen giriş/çıkış tensor şekillerinin Depth-Anything-V2 Small imzasına uyup uymadığını
+     * söyler. Saf (pure) fonksiyondur — Interpreter/Tensor bağımlılığı yoktur; bu sayede
+     * Robolectric birim testlerinde mock/makine gerektirmeden doğrudan test edilebilir.
+     *
+     * Beklenen imza (NHWC): input=[1, 518, 518, 3], output=[1, 518, 518, 1].
+     *
+     * @param inputShape  model giriş tensör şekli.
+     * @param outputShape model çıkış tensör şekli.
+     * @return her iki şekil de beklenenlerle birebir eşleşiyorsa true.
+     */
+    internal fun isSignatureExpected(inputShape: IntArray, outputShape: IntArray): Boolean =
+        inputShape.contentEquals(EXPECTED_INPUT_SHAPE) &&
+            outputShape.contentEquals(EXPECTED_OUTPUT_SHAPE)
 
     fun infer(bitmap: Bitmap): FloatArray {
         val inst = interpreter
         if (inst == null) {
-            return generateMockDepth(INPUT_SIZE, INPUT_SIZE)
+            Log.w(TAG, "Model not loaded — returning empty depth (no fake output).")
+            return FloatArray(0)
         }
 
         return try {
@@ -66,12 +144,13 @@ class DepthInferenceEngine(private val context: Context) {
             depthMap
         } catch (e: Exception) {
             Log.e(TAG, "Inference error: ${e.message}", e)
-            generateMockDepth(INPUT_SIZE, INPUT_SIZE)
+            FloatArray(0)
         }
     }
 
     fun close() {
         interpreter?.close()
+        nnApiDelegate?.close()
         gpuDelegate?.close()
     }
 
@@ -103,25 +182,5 @@ class DepthInferenceEngine(private val context: Context) {
             byteBuffer.putFloat((b - 0.406f) / 0.225f)
         }
         return byteBuffer
-    }
-
-    private fun generateMockDepth(width: Int, height: Int): FloatArray {
-        val size = width * height
-        val depths = FloatArray(size)
-        val timeMs = System.currentTimeMillis()
-        val freq = 0.04f
-        val phase = (timeMs / 250.0) % (2.0 * Math.PI)
-
-        for (y in 0 until height) {
-            for (x in 0 until width) {
-                // Synthesize dynamic radial depth wave from center
-                val dx = x - width / 2.0
-                val dy = y - height / 2.0
-                val dist = kotlin.math.sqrt(dx * dx + dy * dy)
-                val value = (kotlin.math.sin(dist * freq - phase) + 1.0) / 2.0
-                depths[y * width + x] = value.toFloat()
-            }
-        }
-        return depths
     }
 }

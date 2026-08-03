@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Faz 3.2, 3.3 & 4.1 - Ingestion Durum Makinesi
@@ -38,18 +39,29 @@ data class IngestionItem(
 
 /**
  * AlgorDroid Ingestion kuyruk yöneticisi (Thread-Safe Singleton).
+ *
+ * Testability (kalite ekibi refactorü): Bağımlılıklar constructor'dan enjekte
+ * edilebilir hale getirildi — üretimde [getInstance] singleton'ı korunur, testler
+ * ise fake bağımlılıklarla yeni bir [IngestionQueue] örneği üretebilir.
  */
 class IngestionQueue private constructor(
     private val context: Context,
-    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    private val exifValidator: ExifValidator = ExifValidator(),
+    private val manifestGenerator: ManifestGenerator = ManifestGenerator(context),
+    private val mnpExporter: MnpExporter = MnpExporter(context),
+    private val transferAdapter: AlgorDroidTransferAdapter = AlgorDroidTransferAdapter(context),
+    private val meshRepository: MeshRepository = MeshRepository(context),
+    private val cacheCleaner: CacheCleaner = CacheCleaner(context),
 ) {
 
-    private val exifValidator = ExifValidator()
-    private val manifestGenerator = ManifestGenerator(context)
-    private val mnpExporter = MnpExporter(context)
-    private val transferAdapter = AlgorDroidTransferAdapter(context)
-    private val meshRepository = MeshRepository(context)
-    private val cacheCleaner = CacheCleaner(context)
+    /**
+     * H-5c: Kuyruğa eklenmiş bilinen-session seti.
+     *
+     * AlgorDroidResultReceiver, yalnızca bu setteki sessionId'leri kabul eder —
+     * bilinmeyen/uygunsuz broadcast'ler en başta reddedilir.
+     */
+    private val knownSessions = ConcurrentHashMap.newKeySet<String>()
 
     private val _queueState = MutableStateFlow<IngestionState>(IngestionState.Idle)
     val queueState: StateFlow<IngestionState> = _queueState.asStateFlow()
@@ -66,12 +78,28 @@ class IngestionQueue private constructor(
 
     fun enqueue(session: ScanSession) {
         val sId = session.sessionId.toString()
+        // B14: aynı sessionId zaten kuyrukta/biliniyorsa yeniden enqueue etme (idempotence).
+        // knownSessions.add() false döndürürse session zaten mevcut → çift işleme engeli.
+        if (!knownSessions.add(sId)) {
+            android.util.Log.w(TAG, "Duplicate enqueue ignored: $sId")
+            return
+        }
         _queueState.update { IngestionState.Queued(sId) }
         channel.trySend(IngestionItem(session))
         android.util.Log.i(TAG, "Enqueued session: $sId")
     }
 
+    /**
+     * H-5c: [sessionId] kuyruğa eklenmiş bilinen bir session mı?
+     * AlgorDroidResultReceiver katman 4 doğrulaması bu metodu kullanır.
+     */
+    fun isKnownSession(sessionId: String): Boolean = sessionId in knownSessions
+
+    /** AlgorDroid 3D Engine kurulu mu? (transferAdapter üzerinden dürüst ön-kontrol). */
+    fun isRenderEngineInstalled(): Boolean = transferAdapter.isEngineInstalled()
+
     fun resetToIdle() {
+        knownSessions.clear()
         _queueState.value = IngestionState.Idle
     }
 
@@ -88,7 +116,14 @@ class IngestionQueue private constructor(
     fun markComplete(sessionId: String, meshUri: Uri) {
         scope.launch {
             _queueState.value = IngestionState.Reconstructing(sessionId, 100)
-            val meshFile = meshRepository.importMesh(sessionId, meshUri)
+            // B13: mesh.glb zaten içeri aktarılmışsa yeniden import edilmez (idempotence) —
+            // aynı complete broadcast'i iki kez gelirse dosya tekrar kopyalanmaz.
+            val meshFile = if (meshRepository.hasMeshForSession(sessionId)) {
+                android.util.Log.i(TAG, "markComplete: mesh zaten mevcut, yeniden import yok: $sessionId")
+                meshRepository.getMeshFileForSession(sessionId)
+            } else {
+                meshRepository.importMesh(sessionId, meshUri)
+            }
             if (meshFile != null) {
                 _queueState.value = IngestionState.Reconstructed(sessionId, meshFile)
                 // Cache temizliği tetikle
@@ -96,6 +131,8 @@ class IngestionQueue private constructor(
             } else {
                 _queueState.value = IngestionState.Failed(sessionId, "3D model kopyalanamadı.")
             }
+            // H-5c: session tamamlandı → bilinen-session setinden temizle.
+            knownSessions.remove(sessionId)
         }
     }
 
@@ -104,9 +141,14 @@ class IngestionQueue private constructor(
      */
     fun markError(sessionId: String, error: String) {
         _queueState.value = IngestionState.Failed(sessionId, error)
+        // H-5c: hatalı session da bilinen-session setinden temizlenir.
+        knownSessions.remove(sessionId)
     }
 
-    private suspend fun processIngestion(item: IngestionItem) {
+    /**
+     * Kuyruk işleme adımı (testlerin doğrudan çağırabilmesi için internal).
+     */
+    internal suspend fun processIngestion(item: IngestionItem) {
         val sId = item.session.sessionId.toString()
         runCatching {
             // 1. VALIDATING
@@ -115,6 +157,7 @@ class IngestionQueue private constructor(
             if (!validation.isValid) {
                 val errorMsg = validation.issues.firstOrNull()?.message ?: "EXIF validation failed"
                 _queueState.value = IngestionState.Failed(sId, "Doğrulama Hatası: $errorMsg")
+                knownSessions.remove(sId)
                 return
             }
 
@@ -136,10 +179,12 @@ class IngestionQueue private constructor(
                 android.util.Log.i(TAG, "Successfully delivered MNP for $sId")
             } else {
                 _queueState.value = IngestionState.Failed(sId, transfer.message)
+                knownSessions.remove(sId)
             }
         }.onFailure { e ->
             android.util.Log.e(TAG, "Ingestion failed for $sId", e)
             _queueState.value = IngestionState.Failed(sId, e.message ?: "Bilinmeyen kuyruk hatası")
+            knownSessions.remove(sId)
         }
     }
 

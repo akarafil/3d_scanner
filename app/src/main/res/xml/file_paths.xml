@@ -4,5 +4,7 @@
     <cache-path name="shared_zips" path="shared_zips/" />
     <!-- Phase 3.1: AlgorDroid MNP paket paylaşımı için -->
     <cache-path name="shared_mnp" path="shared_mnp/" />
+    <!-- B-1 Blocker: PlyExporter cache/shared_ply/ altına yazıyor; eksik path FileProvider.getUriForFile'da IllegalArgumentException fırlatıyordu. -->
+    <cache-path name="shared_ply" path="shared_ply/" />
     <files-path name="scan_projects" path="scan_projects/" />
 </paths>

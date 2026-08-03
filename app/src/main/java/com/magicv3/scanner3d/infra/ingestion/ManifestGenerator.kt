@@ -21,6 +21,17 @@ class ManifestGenerator(private val context: Context) {
     }
 
     /**
+     * H-6: Float dizisini API 28/29 uyumlu biçimde JSONArray'e çevirir.
+     * `JSONArray(FloatArray)` yapıcısı yalnızca API 30+ cihazlarda desteklenir;
+     * bu yardımcı her API seviyesinde güvenli çalışır.
+     */
+    private fun floatArrayToJsonArray(values: FloatArray): JSONArray {
+        val arr = JSONArray()
+        values.forEach { arr.put(it.toDouble()) }
+        return arr
+    }
+
+    /**
      * Proje klasörüne manifest.json dosyasını yazar.
      */
     suspend fun generateManifest(session: ScanSession): File = withContext(Dispatchers.IO) {
@@ -52,9 +63,11 @@ class ManifestGenerator(private val context: Context) {
                     put("capturedAtMs", frame.capturedAtMs)
 
                     if (frame.translation != null && frame.rotation != null) {
+                        // H-6: JSONArray(FloatArray) API 30+ gerektirir; minSdk 28/29'da
+                        //      JSONException fırlatır. Manuel Double dönüşümü kullan.
                         put("pose", JSONObject().apply {
-                            put("translation", JSONArray(frame.translation))
-                            put("rotation_quaternion", JSONArray(frame.rotation))
+                            put("translation", floatArrayToJsonArray(frame.translation))
+                            put("rotation_quaternion", floatArrayToJsonArray(frame.rotation))
                         })
                     }
 
@@ -67,11 +80,18 @@ class ManifestGenerator(private val context: Context) {
                         val orient = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, 1)
                         val userComment = exif.getAttribute(ExifInterface.TAG_USER_COMMENT) ?: ""
 
-                        put("focalLength35mmEquiv", focal35)
-                        put("width", width)
-                        put("height", height)
-                        put("orientation", orient)
-                        put("userComment", userComment)
+                        // Yalnızca dosya gerçekten okunabilir bir görsel içeriyorsa EXIF alanlarını yaz.
+                        // Gerçek cihazda geçersiz dosya için ExifInterface IOException fırlatır (runCatching
+                        // yakalar); Robolectric ise fırlatmayıp varsayılan 0 değerleri döndürür. Bu kontrol
+                        // iki ortamda da tutarlı davranış sağlar ve bozuk/eksik dosyalar için uydurma
+                        // "0" EXIF değerlerinin manifest'e girmesini önler.
+                        if (width > 0 || height > 0) {
+                            put("focalLength35mmEquiv", focal35)
+                            put("width", width)
+                            put("height", height)
+                            put("orientation", orient)
+                            put("userComment", userComment)
+                        }
                     }
                 }
                 framesArray.put(frameObj)

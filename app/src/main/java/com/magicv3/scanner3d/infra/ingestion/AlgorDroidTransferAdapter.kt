@@ -3,6 +3,8 @@ package com.magicv3.scanner3d.infra.ingestion
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import java.io.File
 
 /**
@@ -16,6 +18,16 @@ class AlgorDroidTransferAdapter(private val context: Context) {
         const val EXTRA_PACKAGE_URI = "com.algordroid.engine.EXTRA_PACKAGE_URI"
         const val EXTRA_SESSION_ID = "com.algordroid.engine.EXTRA_SESSION_ID"
         const val MNP_MIME_TYPE = "application/vnd.magic3dscanner.package"
+
+        /**
+         * B7: revokeUriPermission gecikme penceresi.
+         *
+         * `sendBroadcast` asenkrondur; engine onReceive sonrası URI'yi okur.
+         * İzin hemen geri alınırsa engine'in URI erişimi kırılabilir. Bu nedenle
+         * engine'in URI'yi erken okuması için 10s'lik bir pencere tanınır, ardından
+         * izin geri alınır (kalıcı URI erişim yüzeyi kapatılır).
+         */
+        private const val DELAYED_REVOKE_MS = 10_000L
     }
 
     data class TransferResult(
@@ -25,6 +37,10 @@ class AlgorDroidTransferAdapter(private val context: Context) {
 
     /**
      * MNP paketini doğrular ve AlgorDroid Engine'e Intent Broadcast ile fırlatır.
+     *
+     * H-5e: [grantUriPermission] sonrası dispatch tamamlandığında izin **gecikmeli**
+     * geri alınır (revokeUriPermission) — B7: engine onReceive içinde URI'yi
+     * okuyabilmesi için 10s'lik pencere tanınır, ardından kalıcı URI erişim izni kapatılır.
      */
     fun dispatchPackage(sessionId: String, mnpFile: File, uri: Uri): TransferResult {
         // 1. M3SP Header Güvenlik Kontrolü
@@ -49,24 +65,45 @@ class AlgorDroidTransferAdapter(private val context: Context) {
                 Intent.FLAG_GRANT_READ_URI_PERMISSION
             )
 
-            val intent = Intent(ACTION_INGEST_PACKAGE).apply {
-                type = MNP_MIME_TYPE
-                putExtra(EXTRA_PACKAGE_URI, uri)
-                putExtra(EXTRA_SESSION_ID, sessionId)
-                putExtra(Intent.EXTRA_STREAM, uri)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                `package` = targetPackage
-            }
+            try {
+                val intent = Intent(ACTION_INGEST_PACKAGE).apply {
+                    type = MNP_MIME_TYPE
+                    putExtra(EXTRA_PACKAGE_URI, uri)
+                    putExtra(EXTRA_SESSION_ID, sessionId)
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    `package` = targetPackage
+                }
 
-            context.sendBroadcast(intent)
-            android.util.Log.i(TAG, "Dispatched MNP package to AlgorDroid: ${mnpFile.name}")
-            TransferResult(true, "Paket AlgorDroid motoruna fırlatıldı.")
+                context.sendBroadcast(intent)
+                android.util.Log.i(TAG, "Dispatched MNP package to AlgorDroid: ${mnpFile.name}")
+                TransferResult(true, "Paket AlgorDroid motoruna fırlatıldı.")
+            } finally {
+                // B7: sendBroadcast asenkrondur — engine onReceive'da URI'yi okuyabilmesi
+                // için 10s'lik pencere tanınır, sonra izin geri alınır (kalıcı izin yok).
+                Handler(Looper.getMainLooper()).postDelayed({
+                    runCatching {
+                        context.revokeUriPermission(
+                            targetPackage,
+                            uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        )
+                    }
+                    android.util.Log.d(TAG, "Delayed revoke: URI read permission for $targetPackage")
+                }, DELAYED_REVOKE_MS)
+            }
         }.getOrElse { e ->
             android.util.Log.e(TAG, "Failed to send broadcast, launching chooser", e)
             launchChooserFallback(mnpFile, uri)
             TransferResult(true, "Share Sheet Fallback açıldı.")
         }
     }
+
+    /**
+     * AlgorDroid 3D Engine kurulu mu? Render akışı başlatılmadan önce dürüst ön-kontrol
+     * için kullanılır (kurulu değilse paylaşım yedeği fallback'ine açıkça geçilir).
+     */
+    fun isEngineInstalled(): Boolean = isAppInstalled("com.algordroid.engine")
 
     private fun isAppInstalled(packageName: String): Boolean {
         return try {

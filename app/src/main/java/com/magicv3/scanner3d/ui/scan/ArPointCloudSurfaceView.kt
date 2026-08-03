@@ -23,12 +23,20 @@ class ArPointCloudSurfaceView(
         setZOrderMediaOverlay(true)
 
         setRenderer(renderer)
-        renderMode = RENDERMODE_CONTINUOUSLY
+
+        // O-5: RENDERMODE_CONTINUOUSLY yerine WHEN_DIRTY + requestRender.
+        // Renderer her kare çiziminin sonunda bir sonraki kareyi kendisi talep
+        // eder (ARCore update akışı kesintisiz); paused durumda döngü durur →
+        // pil tasarrufu.
+        renderMode = RENDERMODE_WHEN_DIRTY
+        renderer.requestRender = { requestRender() }
     }
 
     override fun onResume() {
         super.onResume()
         renderer.onResume()
+        // WHEN_DIRTY modunda ilk kareyi manuel tetikle; sonrası renderer içinden devam eder.
+        requestRender()
     }
 
     override fun onPause() {

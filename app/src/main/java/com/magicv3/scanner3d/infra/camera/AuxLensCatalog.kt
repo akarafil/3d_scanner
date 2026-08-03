@@ -119,8 +119,10 @@ class AuxLensCatalog(private val context: Context) {
      *  - id=3,5 → 1.92mm, 2560x1920 (Selfie logical sub-id)
      *  - id=8,9 → 1.92mm, 640x480  (safety/depth sensörleri, fallback)
      *  - id=6,7 → 5.4mm, rejected
+     *
+     * Testability: birim testler doğrudan çağırabilsin diye internal.
      */
-    private fun classifyByFocalAndPixels(
+    internal fun classifyByFocalAndPixels(
         focalMm: Float,
         sensorSize: SizeF,
         pixelCount: Int,

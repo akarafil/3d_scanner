@@ -4,44 +4,57 @@ import android.content.Context
 import android.content.Intent
 import androidx.core.content.FileProvider
 import com.magicv3.scanner3d.domain.usecase.Point3D
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileWriter
+import java.io.PrintWriter
 
 class PlyExporter(private val context: Context) {
 
     /**
      * Writes accumulated 3D points to an ASCII PLY file.
+     *
+     * H-1: Ağır ASCII PLY serileştirmesi [Dispatchers.IO] üzerinde çalışır
+     * ([withContext] ile) — çağıran ViewModel/UI main thread'ini asla bloklamaz.
+     * [PrintWriter] + [bufferedWriter] kullanıldığından nokta başına string
+     * concatenation/allocation oluşmaz (FileWriter'a kıyasla).
+     *
+     * Suspend: bu metot yalnızca coroutine context'ten çağrılabilir.
      */
-    fun export(projectName: String, points: List<Point3D>): File {
-        val safeName = projectName.replace(Regex("[^A-Za-z0-9_-]"), "_")
-        val exportDir = File(context.cacheDir, "shared_ply").apply { mkdirs() }
-        val plyFile = File(exportDir, "${safeName}_model.ply")
+    suspend fun export(projectName: String, points: List<Point3D>): File =
+        withContext(Dispatchers.IO) {
+            val safeName = projectName.replace(Regex("[^A-Za-z0-9_-]"), "_")
+            val exportDir = File(context.cacheDir, "shared_ply").apply { mkdirs() }
+            val plyFile = File(exportDir, "${safeName}_model.ply")
 
-        // Delete old PLY exports older than 24h
-        exportDir.listFiles()?.forEach { old ->
-            if (old.isFile && old.lastModified() < System.currentTimeMillis() - 24 * 3600 * 1000L) {
-                old.delete()
+            // Delete old PLY exports older than 24h
+            exportDir.listFiles()?.forEach { old ->
+                if (old.isFile && old.lastModified() < System.currentTimeMillis() - 24 * 3600 * 1000L) {
+                    old.delete()
+                }
             }
-        }
 
-        FileWriter(plyFile).use { writer ->
-            writer.write("ply\n")
-            writer.write("format ascii 1.0\n")
-            writer.write("element vertex ${points.size}\n")
-            writer.write("property float x\n")
-            writer.write("property float y\n")
-            writer.write("property float z\n")
-            writer.write("property uchar red\n")
-            writer.write("property uchar green\n")
-            writer.write("property uchar blue\n")
-            writer.write("end_header\n")
+            // BufferedWriter üzerine kurulu PrintWriter — her satır yazımı tek println
+            // çağrısıdır; use {} kapattığında tampon flus edilir.
+            PrintWriter(plyFile.bufferedWriter()).use { writer ->
+                writer.println("ply")
+                writer.println("format ascii 1.0")
+                writer.println("element vertex ${points.size}")
+                writer.println("property float x")
+                writer.println("property float y")
+                writer.println("property float z")
+                writer.println("property uchar red")
+                writer.println("property uchar green")
+                writer.println("property uchar blue")
+                writer.println("end_header")
 
-            for (p in points) {
-                writer.write("${p.x} ${p.y} ${p.z} ${p.r} ${p.g} ${p.b}\n")
+                for (p in points) {
+                    writer.println("${p.x} ${p.y} ${p.z} ${p.r} ${p.g} ${p.b}")
+                }
+                writer.flush()
             }
+            plyFile
         }
-        return plyFile
-    }
 
     /**
      * Launches sharesheet chooser for PLY model.

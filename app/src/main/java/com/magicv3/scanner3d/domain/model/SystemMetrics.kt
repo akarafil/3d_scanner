@@ -221,7 +221,8 @@ data class ThermalMetrics(
     val allZoneReadings: List<ThermalZoneReading>,
     val throttlingLevel: Int,
     val throttleWarning: Boolean,
-    val timestamp: Long
+    val timestamp: Long,
+    val thermalStatus: Int = -1
 ) {
     companion object {
         val EMPTY = ThermalMetrics(
@@ -235,7 +236,8 @@ data class ThermalMetrics(
             allZoneReadings = emptyList(),
             throttlingLevel = 0,
             throttleWarning = false,
-            timestamp = 0L
+            timestamp = 0L,
+            thermalStatus = -1
         )
     }
 }
